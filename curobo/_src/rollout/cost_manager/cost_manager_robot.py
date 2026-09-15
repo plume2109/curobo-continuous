@@ -16,6 +16,7 @@ import torch
 # CuRobo
 from curobo._src.cost.cost_base import BaseCost
 from curobo._src.cost.cost_cspace_dist import CSpaceDistCost
+from curobo._src.cost.cost_relative_pose import RelativePoseCost
 from curobo._src.cost.cost_scene_collision import SceneCollisionCost
 from curobo._src.cost.cost_self_collision import SelfCollisionCost
 from curobo._src.cost.cost_tool_pose import ToolPoseCost
@@ -177,6 +178,12 @@ class RobotCostManager:
             config.tool_pose_cfg.set_tool_frames(transition_model.robot_model.tool_frames)
             self.register_cost("tool_pose", ToolPoseCost(config.tool_pose_cfg))
 
+        # Relative pose (loop closure between two tool frames, e.g. a rigid two-hand co-grasp).
+        # Registered here when configured; otherwise it can be injected post-construction (see
+        # register_cost). Built disabled if its weight is 0 -- enable/retarget it at solve time.
+        if config.relative_pose_cfg is not None:
+            self.register_cost("relative_pose", RelativePoseCost(config.relative_pose_cfg))
+
         # Start cspace distance
         if config.start_cspace_dist_cfg is not None:
             config.start_cspace_dist_cfg.initialize_from_transition_model(transition_model)
@@ -236,6 +243,18 @@ class RobotCostManager:
                         goal.idxs_link_pose,
                     )
                     cost_collection.add(cost_value, "tool_pose")
+
+
+        # Relative pose (loop closure). Reads both frames straight from state.tool_poses -- no
+        # goal needed. Evaluated unconditionally once registered: the term is gated purely by
+        # its weight tensor (zero weight -> zero cost), never by Python control flow. This is
+        # what makes enabling/retargeting it at solve time work under CUDA-graph capture --
+        # a branch skipped at capture time would stay skipped on every replay.
+        if self.has_cost("relative_pose"):
+            relative_pose_cost = self.get_cost("relative_pose")
+            with self._stream_context("relative_pose"):
+                cost_value = relative_pose_cost.forward(state.tool_poses)
+                cost_collection.add(cost_value, "relative_pose")
 
         # Cspace bounds/limits
         if self.has_cost("cspace"):
@@ -356,6 +375,17 @@ class RobotCostManager:
                 convergence.add(rotation_error, "tool_pose_orientation_tolerance")
                 convergence.add(goalset_idx, "tool_pose_goalset_index")
 
+        # Loop-closure drift, in metres / radians. Reported unconditionally once registered
+        # (same CUDA-graph reasoning as in compute_costs) and self-masking: the values are
+        # identically zero while the coupling weight is zero, so an uncoupled plan is never
+        # judged against a drift tolerance. Each value is the running max over the horizon,
+        # so the terminal entry a solver inspects reflects the whole trajectory.
+        if self.has_cost("relative_pose"):
+            relative_pose_cost = self.get_cost("relative_pose")
+            position_drift, rotation_drift = relative_pose_cost.compute_drift(state.tool_poses)
+            convergence.add(position_drift, "relative_pose_drift_position")
+            convergence.add(rotation_drift, "relative_pose_drift_rotation")
+
         return convergence
 
     # -- Update params --
@@ -373,6 +403,26 @@ class RobotCostManager:
                 return
             if tool_pose_cost is not None:
                 tool_pose_cost.update_tool_pose_criteria(tool_pose_criteria)
+        if "relative_pose_target" in kwargs:
+            # None -> disable; (pos, quat_wxyz) -> retarget and enable.
+            # Only tensor VALUES change here (weight + target buffers, both in place), never
+            # the set of ops evaluated -- compute_costs/compute_convergence always run the
+            # relative-pose term once it is registered. That is what keeps this usable after
+            # CUDA-graph capture, which enable_cost()/disable_cost() would not be: they flip
+            # a Python flag that a replayed graph can no longer observe.
+            # ``_cost_enabled`` is kept in sync for introspection only (get_enabled_costs).
+            relative_pose_cost = self.get_cost("relative_pose")
+            if relative_pose_cost is not None:
+                target = kwargs["relative_pose_target"]
+                if target is None:
+                    relative_pose_cost._weight.fill_(0.0)
+                    relative_pose_cost._cost_enabled = False
+                else:
+                    relative_pose_cost.update_target(target[0], target[1])
+                    relative_pose_cost._weight.copy_(relative_pose_cost.config.weight)
+                    relative_pose_cost._cost_enabled = bool(
+                        torch.sum(relative_pose_cost._weight) != 0.0
+                    )
         if "dt" in kwargs:
             self.update_dt(kwargs["dt"])
 

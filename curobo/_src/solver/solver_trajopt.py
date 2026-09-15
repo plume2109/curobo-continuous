@@ -171,6 +171,9 @@ class TrajOptSolver:
     def update_tool_pose_criteria(self, tool_pose_criteria):
         return self.core.update_tool_pose_criteria(tool_pose_criteria)
 
+    def update_relative_pose_target(self, target) -> None:
+        self.core.update_relative_pose_target(target)
+
     def update_link_inertial(self, link_name, mass=None, com=None, inertia=None):
         return self.core.update_link_inertial(link_name, mass, com, inertia)
 

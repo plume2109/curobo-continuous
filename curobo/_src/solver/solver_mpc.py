@@ -215,12 +215,48 @@ class MPCSolver:
         self.core.destroy()
 
     # -------------------------------------------------------------------
-    # MPC-specific: tool pose criteria also updates ik_solver
+    # MPC-specific: tool pose criteria and relative pose also update ik_solver
     # -------------------------------------------------------------------
 
     def update_tool_pose_criteria(self, tool_pose_criteria: Dict[str, ToolPoseCriteria]):
         self.ik_solver.update_tool_pose_criteria(tool_pose_criteria)
         self.core.update_tool_pose_criteria(tool_pose_criteria)
+
+    def update_relative_pose_target(self, target) -> None:
+        """Propagate relative-pose target to both this solver and the IK seeder."""
+        self.ik_solver.update_relative_pose_target(target)
+        self.core.update_relative_pose_target(target)
+
+    def enable_leader_follower_coupling(
+        self,
+        follower_frame: str,
+        rel_pos,
+        rel_quat,
+    ) -> None:
+        """Enable rigid leader/follower coupling for MPC.
+
+        Zeros the follower's absolute pose cost and activates the relative-pose
+        cost.  Call once before the MPC control loop; call
+        :meth:`disable_leader_follower_coupling` to release.
+
+        Args:
+            follower_frame: Name of the follower tool frame.
+            rel_pos: ``(3,)`` target translation of relpose(leader, follower).
+            rel_quat: ``(4,)`` wxyz target rotation of relpose(leader, follower).
+        """
+        self._coupling_follower_frame = follower_frame
+        self._coupling_saved_criteria = self.core.snapshot_tool_pose_criteria(follower_frame)
+        self.update_tool_pose_criteria({follower_frame: ToolPoseCriteria.disabled()})
+        self.update_relative_pose_target((rel_pos, rel_quat))
+
+    def disable_leader_follower_coupling(self) -> None:
+        """Release leader/follower coupling and restore the follower's original pose cost."""
+        if not hasattr(self, "_coupling_saved_criteria") or self._coupling_saved_criteria is None:
+            return
+        self.update_relative_pose_target(None)
+        self.update_tool_pose_criteria({self._coupling_follower_frame: self._coupling_saved_criteria})
+        self._coupling_saved_criteria = None
+        self._coupling_follower_frame = None
 
     # -------------------------------------------------------------------
     # Goal buffer

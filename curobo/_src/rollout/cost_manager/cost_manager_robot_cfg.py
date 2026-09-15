@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 # CuRobo
 from curobo._src.cost.cost_cspace_cfg import CSpaceCostCfg
 from curobo._src.cost.cost_cspace_dist_cfg import CSpaceDistCostCfg
+from curobo._src.cost.cost_relative_pose_cfg import RelativePoseCostCfg
 from curobo._src.cost.cost_scene_collision_cfg import SceneCollisionCostCfg
 from curobo._src.cost.cost_self_collision_cfg import SelfCollisionCostCfg
 from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
@@ -61,6 +62,9 @@ class RobotCostManagerCfg:
     #: Tool (end-effector) pose tracking cost configuration. None
     #: disables pose-based objectives.
     tool_pose_cfg: Optional[ToolPoseCostCfg] = None
+    #: Relative-pose (loop-closure) cost between two tool frames, e.g. a rigid two-hand
+    #: co-grasp. None disables it.
+    relative_pose_cfg: Optional[RelativePoseCostCfg] = None
 
     def __post_init__(self):
         from .cost_manager_robot import RobotCostManager
@@ -85,6 +89,7 @@ class RobotCostManagerCfg:
             "start_cspace_dist_cfg": CSpaceDistCostCfg,
             "target_cspace_dist_cfg": CSpaceDistCostCfg,
             "tool_pose_cfg": ToolPoseCostCfg,
+            "relative_pose_cfg": RelativePoseCostCfg,
         }
         data = {}
         for k, cfg_class in cost_key_map.items():

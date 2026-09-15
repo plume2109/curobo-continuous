@@ -295,6 +295,14 @@ class IKSolver:
             self.seed_ik_solver.update_tool_pose_criteria(tool_pose_criteria)
         self.core.update_tool_pose_criteria(tool_pose_criteria)
 
+    def update_relative_pose_target(self, target) -> None:
+        """Propagate a relative-pose target to this solver's rollouts.
+
+        ``seed_ik_solver`` uses its own error-calculator architecture and does
+        not have a ``RelativePoseCost``, so it is intentionally skipped here.
+        """
+        self.core.update_relative_pose_target(target)
+
     def reset_seed(self):
         if self.config.use_lm_seed:
             self.seed_ik_solver.reset_seed()

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from curobo._src.collision.attachment_manager import AttachmentManager
+from curobo._src.cost.cost_relative_pose import _quat_multiply, _quat_rotate
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 from curobo._src.geom.collision.collision_scene import create_scene_collision
 from curobo._src.geom.types import SceneCfg
@@ -638,3 +639,93 @@ class MotionPlanner:
     def update_tool_pose_criteria(self, tool_pose_criteria: Dict[str, ToolPoseCriteria]):
         self.ik_solver.update_tool_pose_criteria(tool_pose_criteria)
         self.trajopt_solver.update_tool_pose_criteria(tool_pose_criteria)
+
+    def update_relative_pose_target(self, target) -> None:
+        """Propagate relative-pose target to both IK and TrajOpt solvers."""
+        self.ik_solver.update_relative_pose_target(target)
+        self.trajopt_solver.update_relative_pose_target(target)
+
+    def plan_coupled_pose(
+        self,
+        leader_goal: Pose,
+        current_state: JointState,
+        rel_pos,
+        rel_quat,
+        leader_frame: str,
+        follower_frame: str,
+        enforce_coupling_along_path: bool = True,
+        **plan_kwargs,
+    ) -> Optional[TrajOptSolverResult]:
+        """Plan a trajectory for a rigidly coupled leader/follower arm pair.
+
+        The follower's goal is computed directly from the leader goal and the rigid relative
+        transform, so both arms get explicit, mutually consistent absolute targets and can be
+        planned simultaneously with normal collision avoidance.
+
+        Absolute goals only constrain the trajectory's *endpoints*: nothing stops
+        ``relpose(leader, follower)`` from drifting mid-trajectory, which for a rigid
+        co-grasp means crushing or dropping the object. With
+        ``enforce_coupling_along_path`` (default) the relative-pose cost is therefore
+        activated on the TrajOpt rollouts for the duration of the call, and the resulting
+        drift is reported through the convergence metrics, so a plan that violates the
+        coupling mid-path is not reported as successful. IK is deliberately left uncoupled:
+        it solves a static state, where the two targets are consistent by construction.
+
+        Args:
+            leader_goal: Target :class:`Pose` for the leader frame, shape ``[1, 3/4]``.
+            current_state: Current robot joint state.
+            rel_pos: ``(3,)`` translation of relpose(leader→follower) = R_leader^T (p_follower - p_leader).
+            rel_quat: ``(4,)`` wxyz rotation of relpose(leader→follower) = R_leader^T R_follower.
+            leader_frame: Name of the leader tool frame.
+            follower_frame: Name of the follower tool frame.
+            enforce_coupling_along_path: Activate the relative-pose cost on the TrajOpt
+                rollouts during this call. Requires ``relative_pose_cfg`` (with these two
+                frames) in the TrajOpt cost configuration.
+            **plan_kwargs: Forwarded to :meth:`plan_pose`.
+
+        Returns:
+            :class:`TrajOptSolverResult` or ``None`` if planning failed.
+        """
+        if leader_goal.position.shape[0] != 1:
+            # A goalset would let the pose kernel pick its goal index independently per tool
+            # frame (argmin over g_idx is per-link), so the leader could converge to goal i
+            # while the follower converges to goal j -- a pair matching no rigid object pose.
+            # Resolving a multi-candidate grasp combo must happen upstream (uncoupled IK,
+            # where the cost is separable), leaving a single pair here.
+            log_and_raise(
+                "plan_coupled_pose expects a single leader goal, got "
+                f"{leader_goal.position.shape[0]}: a coupled pair cannot be expressed as a "
+                "goalset because the pose cost selects its goal index independently per frame."
+            )
+
+        dev = leader_goal.position.device
+        dt = leader_goal.position.dtype
+
+        # reshape to [1, 3/4] so this works whether rel_pos is a list, numpy array, or
+        # 0-d/1-d tensor.
+        rel_pos_t = torch.as_tensor(rel_pos, device=dev, dtype=dt).reshape(1, 3)
+        rel_quat_t = torch.as_tensor(rel_quat, device=dev, dtype=dt).reshape(1, 4)
+
+        # T_B_goal = T_A_goal * T_rel   (T_rel = T_A_init^{-1} * T_B_init)
+        # p_B = p_A + R_A * rel_pos     (rel_pos expressed in A's local frame)
+        # q_B = q_A ⊗ rel_quat
+        follower_pos = leader_goal.position + _quat_rotate(leader_goal.quaternion, rel_pos_t)
+        follower_quat = _quat_multiply(leader_goal.quaternion, rel_quat_t)
+        follower_goal = Pose(
+            position=follower_pos.contiguous(), quaternion=follower_quat.contiguous()
+        )
+
+        goal = GoalToolPose.from_poses(
+            {leader_frame: leader_goal, follower_frame: follower_goal},
+            ordered_tool_frames=[leader_frame, follower_frame],
+            num_goalset=1,
+        )
+
+        if not enforce_coupling_along_path:
+            return self.plan_pose(goal, current_state, **plan_kwargs)
+
+        self.trajopt_solver.update_relative_pose_target((rel_pos_t.view(3), rel_quat_t.view(4)))
+        try:
+            return self.plan_pose(goal, current_state, **plan_kwargs)
+        finally:
+            self.trajopt_solver.update_relative_pose_target(None)

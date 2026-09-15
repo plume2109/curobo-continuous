@@ -439,6 +439,51 @@ class SolverCore:
             rollout.update_params_cost_managers(tool_pose_criteria=tool_pose_criteria)
         self.auxiliary_rollout.update_params_cost_managers(tool_pose_criteria=tool_pose_criteria)
 
+    def update_relative_pose_target(self, target) -> None:
+        """Broadcast a relative-pose target to every rollout's cost manager.
+
+        Args:
+            target: ``(rel_pos, rel_quat_wxyz)`` tuple to enable the cost, or
+                ``None`` to disable it.  In-place tensor updates keep this
+                CUDA-graph safe when called between solves.
+        """
+        kwargs = {"relative_pose_target": target}
+        self.metrics_rollout.update_params_cost_managers(**kwargs)
+        for rollout in self.additional_metrics_rollouts.values():
+            rollout.update_params_cost_managers(**kwargs)
+        for rollout in self.optimizer_rollouts:
+            rollout.update_params_cost_managers(**kwargs)
+        self.auxiliary_rollout.update_params_cost_managers(**kwargs)
+
+    def snapshot_tool_pose_criteria(self, frame: str) -> ToolPoseCriteria:
+        """Return a clone of the live per-frame tool-pose criteria.
+
+        Reads from the stacked tensors (not construction-time config) so the
+        snapshot is always the current, possibly-updated state.
+
+        Args:
+            frame: Tool frame name whose criteria to snapshot.
+
+        Returns:
+            A new :class:`ToolPoseCriteria` with cloned tensors.
+        """
+        tp_costs = self.metrics_rollout.get_cost_component_by_name("tool_pose")
+        if not tp_costs:
+            log_and_raise(f"snapshot_tool_pose_criteria: no tool_pose cost in metrics_rollout")
+        tp_cost = tp_costs[0]
+        if frame not in tp_cost.tool_frames:
+            log_and_raise(f"snapshot_tool_pose_criteria: frame '{frame}' not in {tp_cost.tool_frames}")
+        idx = tp_cost.tool_frames.index(frame)
+        stacked = tp_cost._stacked_tool_pose_criteria
+        return ToolPoseCriteria(
+            terminal_pose_axes_weight_factor=stacked.terminal_pose_axes_weight_factor[idx].clone(),
+            non_terminal_pose_axes_weight_factor=stacked.non_terminal_pose_axes_weight_factor[idx].clone(),
+            terminal_pose_convergence_tolerance=stacked.terminal_pose_convergence_tolerance[idx].clone(),
+            non_terminal_pose_convergence_tolerance=stacked.non_terminal_pose_convergence_tolerance[idx].clone(),
+            project_distance_to_goal=stacked.project_distance_to_goal[idx].clone(),
+            device_cfg=tp_cost.device_cfg,
+        )
+
     # -----------------------------------------------------------------------
     # Sample configs (collision activation distance passed as arg)
     # -----------------------------------------------------------------------

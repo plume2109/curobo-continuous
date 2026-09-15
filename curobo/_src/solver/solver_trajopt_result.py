@@ -180,6 +180,19 @@ class TrajOptSolverResult(BaseSolverResult):
                 converge_list.append(converged)
             elif "goalset_index" in metric_name:
                 goalset_index_list.append(last_step_values)  # Keep last step index
+            elif "relative_pose_drift" in metric_name:
+                # Loop-closure drift of a coupled tool pair. The metric is a running max
+                # over the horizon, so the last step carries the worst drift of the whole
+                # trajectory -- a coupled plan only succeeds if the coupling held throughout.
+                # Identically zero when no coupling is active, hence always satisfied then.
+                # Kept out of cost_list on purpose: that list feeds the per-link
+                # position_error/rotation_error reshape, which expects tool_pose entries only.
+                tolerance = (
+                    self.position_tolerance
+                    if "position" in metric_name
+                    else self.orientation_tolerance
+                )
+                converge_list.append(last_step_values < tolerance)
 
         # Combine convergence criteria
         if converge_list:
