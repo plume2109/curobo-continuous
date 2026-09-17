@@ -41,6 +41,12 @@ If you found this work useful, please cite cuRoboV2,
 
 Contributions are welcome. Bugs: [open an issue](https://github.com/NVlabs/curobo/issues). General usage questions: [GitHub Discussions](https://github.com/NVlabs/curobo/discussions). For pull requests, please read [`CONTRIBUTING.md`](CONTRIBUTING.md). All commits must include a DCO sign-off (`git commit -s`).
 
+## TODO 
+
+- RelativeCost is constraint by the order of the toolframes. Remove this constraints (Frame A leader and Frame B follower can also be Frame B leader and Frame A follower) 
+- Add multiple toolframes goalset ( being able to detect which COMBINAISON is best). Right now both toolframes are not linked.
+- Refacto either to SO3 or similar thing as Placo ( cos - sin ) for continuous joint.  
+
 ## License
 
 cuRobo is released under the [Apache 2.0 license](LICENSE).
