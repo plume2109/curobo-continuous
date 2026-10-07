@@ -25,6 +25,7 @@ Example:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Sequence
 from os import PathLike
@@ -456,6 +457,22 @@ class Mapper:
     def reset(self) -> None:
         """Reset mapper for new scene."""
         self._integrator.reset()
+        self._last_voxel_grid = None
+
+    def set_origin(self, grid_center: torch.Tensor) -> None:
+        """Move the map to a new grid center and reset it.
+
+        Equivalent to building a new Mapper with ``grid_center``, without
+        recompiling kernels or reallocating buffers. The map is cleared.
+
+        Args:
+            grid_center: New world coordinate of the grid center, shape ``(3,)`` [m].
+        """
+        grid_center = torch.as_tensor(grid_center, dtype=torch.float32).reshape(3)
+        self._integrator.set_origin(grid_center)
+        self.config = dataclasses.replace(
+            self.config, grid_center=grid_center.detach().to(device="cpu").clone()
+        )
         self._last_voxel_grid = None
 
     def save_blocks(self, file_path: Union[str, PathLike[str]]) -> None:

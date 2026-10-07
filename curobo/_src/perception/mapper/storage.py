@@ -631,12 +631,10 @@ class BlockSparseTSDFData:
         # Recycle counter
         s.recycle_count = wp.from_torch(self.recycle_count, dtype=wp.int32)
 
+        # Grid center: aliases self.origin, so it must only be updated in place.
+        s.origin = wp.from_torch(self.origin.view(1, 3), dtype=wp.vec3)
+
         # Scalars
-        s.origin = wp.vec3(
-            self.origin[0].item(),
-            self.origin[1].item(),
-            self.origin[2].item(),
-        )
         s.voxel_size = self.voxel_size
         s.hash_capacity = self.hash_capacity
         s.max_blocks = self.max_blocks
@@ -722,16 +720,6 @@ class BlockSparseTSDF:
         assert kernels.grid_shape == config.grid_shape, (
             f"kernels.grid_shape={kernels.grid_shape} does not match "
             f"config.grid_shape={config.grid_shape}"
-        )
-        config_origin = tuple(
-            float(v) for v in config.origin.detach().to(device="cpu").flatten().tolist()
-        )
-        assert all(
-            math.isclose(a, b, rel_tol=0.0, abs_tol=1.0e-6)
-            for a, b in zip(kernels.origin_xyz, config_origin)
-        ), (
-            f"kernels.origin_xyz={kernels.origin_xyz} does not match "
-            f"config.origin={config_origin}"
         )
         assert math.isclose(
             kernels.voxel_size, config.voxel_size, rel_tol=0.0, abs_tol=1.0e-12
@@ -1029,6 +1017,21 @@ class BlockSparseTSDF:
 
         # Note: block_data, block_grid_rgb, and feature grids are cleared
         # lazily when blocks are allocated.
+
+    def set_origin(self, origin: torch.Tensor) -> None:
+        """Move the grid center and clear all blocks.
+
+        Block keys are relative to the grid center, so stored blocks would
+        land at shifted world positions after a move; the map is reset
+        instead. The origin tensor is updated in place, so the cached Warp
+        struct and captured CUDA graphs see the new center and no kernel is
+        rebuilt.
+
+        Args:
+            origin: New grid center in world coordinates, shape ``(3,)`` [m].
+        """
+        self.reset()
+        self._data.origin.copy_(torch.as_tensor(origin, dtype=torch.float32).reshape(3))
 
     def export_blocks(self) -> Dict[str, torch.Tensor]:
         """Export active block payload tensors in compact pool order.

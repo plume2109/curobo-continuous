@@ -24,7 +24,6 @@ def make_lidar_integrate_kernels(
     lidar_image_width: int,
     num_samples: int,
     grid_shape: tuple[int, int, int],
-    origin_xyz: tuple[float, float, float],
     voxel_size: float,
     truncation_distance: float,
     lidar_feature_grid_shape: tuple[int, int] | None,
@@ -50,9 +49,6 @@ def make_lidar_integrate_kernels(
     GRID_D = wp.constant(wp.int32(grid_shape[0]))
     GRID_H = wp.constant(wp.int32(grid_shape[1]))
     GRID_W = wp.constant(wp.int32(grid_shape[2]))
-    ORIGIN_X = wp.constant(wp.float32(origin_xyz[0]))
-    ORIGIN_Y = wp.constant(wp.float32(origin_xyz[1]))
-    ORIGIN_Z = wp.constant(wp.float32(origin_xyz[2]))
     VOXEL_SIZE = wp.constant(wp.float32(voxel_size))
     TRUNCATION_DIST = wp.constant(wp.float32(truncation_distance))
     PI = wp.constant(wp.float32(3.141592653589793))
@@ -87,7 +83,6 @@ def make_lidar_integrate_kernels(
         lidar_image_width,
         num_samples,
         grid_shape,
-        origin_xyz,
         voxel_size,
         truncation_distance,
         lidar_feature_grid_shape,
@@ -160,6 +155,7 @@ def make_lidar_integrate_kernels(
         valid_range_m: wp.array2d(dtype=wp.float32),
         elevation_range_rad: wp.array2d(dtype=wp.float32),
         block_keys: wp.array(dtype=wp.int64),
+        origin: wp.array(dtype=wp.vec3),
     ):
         tid = wp.tid()
         n_pixels = LIDAR_IMAGE_HEIGHT * LIDAR_IMAGE_WIDTH
@@ -204,7 +200,7 @@ def make_lidar_integrate_kernels(
             lidar_quaternions[lidar_idx, 0],
         )
         point_world = lidar_pos + wp.quat_rotate(lidar_quat, ray_dir * r_sample)
-        voxel_f = world_to_continuous_voxel(point_world)
+        voxel_f = world_to_continuous_voxel(point_world, origin[0])
 
         vx = wp.int32(wp.floor(voxel_f[0]))
         vy = wp.int32(wp.floor(voxel_f[1]))
@@ -420,6 +416,7 @@ def make_lidar_integrate_kernels(
         nearest_interpolation_max_allowable_dist_to_ray_m: float,
         block_coords: wp.array(dtype=wp.int32),
         block_data: wp.array3d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         vis_idx, local_idx = wp.tid()
         if vis_idx >= n_visible:
@@ -432,7 +429,7 @@ def make_lidar_integrate_kernels(
         bx = block_coords[pool_idx * 3 + 0]
         by = block_coords[pool_idx * 3 + 1]
         bz = block_coords[pool_idx * 3 + 2]
-        voxel_center = block_local_to_world(bx, by, bz, local_idx)
+        voxel_center = block_local_to_world(bx, by, bz, local_idx, origin[0])
 
         total_sw = wp.float32(0.0)
         total_w = wp.float32(0.0)
@@ -521,6 +518,7 @@ def make_lidar_integrate_kernels(
         elevation_range_rad: wp.array2d(dtype=wp.float32),
         block_coords: wp.array(dtype=wp.int32),
         block_grid_rgb: wp.array3d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         vis_idx, lidar_i, node_idx = wp.tid()
         if vis_idx >= n_visible or node_idx >= COLOR_GRID_VOXELS:
@@ -557,7 +555,7 @@ def make_lidar_integrate_kernels(
         center_offset_y = wp.float32(GRID_H) * wp.float32(0.5)
         center_offset_z = wp.float32(GRID_D) * wp.float32(0.5)
         node_world = (
-            wp.vec3(ORIGIN_X, ORIGIN_Y, ORIGIN_Z)
+            origin[0]
             + wp.vec3(
                 wp.float32(base[0]) + local_x - center_offset_x,
                 wp.float32(base[1]) + local_y - center_offset_y,
@@ -757,6 +755,7 @@ def make_lidar_integrate_kernels(
         feature_grid: wp.array4d(dtype=wp.float16),
         block_features: wp.array3d(dtype=wp.float16),
         block_feature_weight: wp.array2d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         n_channel_groups = (FEATURE_DIM + FEATURE_CHANNELS_PER_THREAD - wp.int32(1)) // FEATURE_CHANNELS_PER_THREAD
         vis_idx, lidar_i, node_group_idx = wp.tid()
@@ -801,7 +800,7 @@ def make_lidar_integrate_kernels(
         center_offset_y = wp.float32(GRID_H) * wp.float32(0.5)
         center_offset_z = wp.float32(GRID_D) * wp.float32(0.5)
         node_world = (
-            wp.vec3(ORIGIN_X, ORIGIN_Y, ORIGIN_Z)
+            origin[0]
             + wp.vec3(
                 wp.float32(base[0]) + local_x - center_offset_x,
                 wp.float32(base[1]) + local_y - center_offset_y,
@@ -1034,6 +1033,7 @@ def make_lidar_integrate_kernels(
         feature_grid: wp.array4d(dtype=wp.float16),
         block_features: wp.array3d(dtype=wp.float16),
         block_feature_weight: wp.array2d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         n_channel_tiles = (FEATURE_DIM + FEATURE_TILE_CHANNELS - wp.int32(1)) // FEATURE_TILE_CHANNELS
         vis_idx, lidar_i, node_tile_idx, lane = wp.tid()
@@ -1077,7 +1077,7 @@ def make_lidar_integrate_kernels(
         center_offset_y = wp.float32(GRID_H) * wp.float32(0.5)
         center_offset_z = wp.float32(GRID_D) * wp.float32(0.5)
         node_world = (
-            wp.vec3(ORIGIN_X, ORIGIN_Y, ORIGIN_Z)
+            origin[0]
             + wp.vec3(
                 wp.float32(base[0]) + local_x - center_offset_x,
                 wp.float32(base[1]) + local_y - center_offset_y,

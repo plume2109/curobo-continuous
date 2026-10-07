@@ -92,7 +92,7 @@ def make_raycast_kernels(
         minimum_tsdf_weight: float,
     ) -> wp.vec2:
         """Sample combined SDF from TSDF struct (nearest-neighbor)."""
-        coords = world_to_block_and_local(world_pos)
+        coords = world_to_block_and_local(world_pos, tsdf.origin[0])
         bx = coords[0]
         by = coords[1]
         bz = coords[2]
@@ -170,7 +170,7 @@ def make_raycast_kernels(
         """Sample combined SDF with trilinear interpolation."""
         block_size_f = wp.float32(tsdf.block_size)
 
-        voxel_f = world_to_continuous_voxel(world_pos)
+        voxel_f = world_to_continuous_voxel(world_pos, tsdf.origin[0])
         vx = voxel_f[0]
         vy = voxel_f[1]
         vz = voxel_f[2]
@@ -264,7 +264,7 @@ def make_raycast_kernels(
     ) -> wp.vec4:
         """Sample weighted RGBW from the per-block RGB grid."""
         base = block_key_to_voxel_base(bx, by, bz)
-        voxel_f = world_to_continuous_voxel(world_pos)
+        voxel_f = world_to_continuous_voxel(world_pos, tsdf.origin[0])
         local_x = voxel_f[0] - wp.float32(base[0])
         local_y = voxel_f[1] - wp.float32(base[1])
         local_z = voxel_f[2] - wp.float32(base[2])
@@ -304,7 +304,7 @@ def make_raycast_kernels(
         world_pos: wp.vec3,
     ) -> wp.vec3:
         """Sample RGB color from the nearest RGB-grid node."""
-        coords = world_to_block_and_local(world_pos)
+        coords = world_to_block_and_local(world_pos, tsdf.origin[0])
         bx = coords[0]
         by = coords[1]
         bz = coords[2]
@@ -478,12 +478,13 @@ def make_raycast_kernels(
         bx: int,
         by: int,
         bz: int,
+        grid_origin: wp.vec3,
     ) -> float:
         """Compute t parameter where ray exits a block (slab method)."""
         voxel_min = block_key_to_voxel_base(bx, by, bz)
         voxel_max = wp.vec3i(voxel_min[0] + BS, voxel_min[1] + BS, voxel_min[2] + BS)
-        block_min = voxel_to_world_corner(voxel_min)
-        block_max = voxel_to_world_corner(voxel_max)
+        block_min = voxel_to_world_corner(voxel_min, grid_origin)
+        block_max = voxel_to_world_corner(voxel_max, grid_origin)
 
         block_min_x = block_min[0]
         block_min_y = block_min[1]
@@ -521,6 +522,7 @@ def make_raycast_kernels(
     ) -> wp.vec2:
         """Raymarch through allocated blocks and return ``(hit_t, valid)``."""
         step_size = tsdf.voxel_size * MIN_STEP_SCALE
+        grid_origin = tsdf.origin[0]
 
         t = float(depth_minimum_distance)
         prev_sdf = float(1e10)
@@ -540,7 +542,7 @@ def make_raycast_kernels(
 
             pos = cam_pos + ray_world * t
 
-            block_coords = world_to_block_coords(pos)
+            block_coords = world_to_block_coords(pos, grid_origin)
             bx = block_coords[0]
             by = block_coords[1]
             bz = block_coords[2]
@@ -565,6 +567,7 @@ def make_raycast_kernels(
                     bx,
                     by,
                     bz,
+                    grid_origin,
                 )
 
             if not curr_block_allocated:
@@ -893,7 +896,7 @@ def make_raycast_kernels(
         vy = base[1] + ly
         vz = base[2] + lz
 
-        world_pos = voxel_to_world(wp.vec3i(vx, vy, vz))
+        world_pos = voxel_to_world(wp.vec3i(vx, vy, vz), tsdf.origin[0])
 
         out_centers[slot, 0] = world_pos[0]
         out_centers[slot, 1] = world_pos[1]
@@ -959,7 +962,7 @@ def make_raycast_kernels(
         vy = base[1] + ly
         vz = base[2] + lz
 
-        world_pos = voxel_to_world(wp.vec3i(vx, vy, vz))
+        world_pos = voxel_to_world(wp.vec3i(vx, vy, vz), tsdf.origin[0])
 
         out_centers[slot, 0] = world_pos[0]
         out_centers[slot, 1] = world_pos[1]
@@ -1041,7 +1044,7 @@ def make_raycast_kernels(
         vy = base[1] + ly
         vz = base[2] + lz
 
-        world_pos = voxel_to_world(wp.vec3i(vx, vy, vz))
+        world_pos = voxel_to_world(wp.vec3i(vx, vy, vz), tsdf.origin[0])
 
         out_centers[slot, 0] = world_pos[0]
         out_centers[slot, 1] = world_pos[1]

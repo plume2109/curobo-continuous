@@ -34,7 +34,6 @@ _kernels = make_block_sparse_kernels(block_size=8)
 class _CoordinateKernelCfg:
     block_size = 8
     grid_shape = (1024, 1024, 1024)
-    origin = (0.0, 0.0, 0.0)
     voxel_size = 0.002
     truncation_distance = 0.04
 
@@ -150,11 +149,12 @@ def _kernel_find_or_insert(
 def _kernel_world_to_block(
     world_positions: wp.array2d(dtype=wp.float32),
     block_coords: wp.array2d(dtype=wp.int32),
+    origin: wp.vec3,
 ):
     """Test world to block coordinate conversion."""
     tid = wp.tid()
     pos = wp.vec3(world_positions[tid, 0], world_positions[tid, 1], world_positions[tid, 2])
-    coords = world_to_block_coords(pos)
+    coords = world_to_block_coords(pos, origin)
     block_coords[tid, 0] = coords[0]
     block_coords[tid, 1] = coords[1]
     block_coords[tid, 2] = coords[2]
@@ -733,6 +733,7 @@ class TestCoordinateConversion:
             inputs=[
                 wp.from_torch(world_pos, dtype=wp.float32),
                 wp.from_torch(block_coords, dtype=wp.int32),
+                wp.vec3(0.0, 0.0, 0.0),
             ],
         )
 

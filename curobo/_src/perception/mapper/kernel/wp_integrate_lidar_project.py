@@ -370,6 +370,7 @@ class LidarProjectIntegrator:
                 wp.from_torch(valid_range_m, dtype=wp.float32),
                 wp.from_torch(elevation_range_rad, dtype=wp.float32),
                 wp.from_torch(self.block_keys[:n_keys]),
+                data.origin,
             ],
             device=device,
             stream=stream,
@@ -412,6 +413,7 @@ class LidarProjectIntegrator:
                 self.nearest_interpolation_max_allowable_dist_to_ray_m,
                 data.block_coords,
                 data.block_data,
+                data.origin,
             ],
             device=device,
             stream=stream,
@@ -440,6 +442,7 @@ class LidarProjectIntegrator:
                 wp.from_torch(elevation_range_rad, dtype=wp.float32),
                 data.block_coords,
                 data.block_grid_rgb,
+                data.origin,
             ],
             device=device,
             stream=stream,
@@ -461,6 +464,7 @@ class LidarProjectIntegrator:
                 wp.from_torch(feature_grid, dtype=wp.float16),
                 data.block_features,
                 data.block_feature_weight,
+                data.origin,
             ]
             feature_channel_groups = (
                 feature_dim_cfg + self.feature_channels_per_thread - 1

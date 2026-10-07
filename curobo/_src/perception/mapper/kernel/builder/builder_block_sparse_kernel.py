@@ -61,7 +61,6 @@ class BlockSparseKernels:
     lidar_image_width: int
     num_samples: int
     grid_shape: tuple[int, int, int]
-    origin_xyz: tuple[float, float, float]
     voxel_size: float
     truncation_distance: float
     feature_grid_shape: tuple[int, int] | None
@@ -259,21 +258,6 @@ def _resolve_esdf_grid_shape(cfg: Any | None) -> tuple[int, int, int]:
     return tuple(int(v) for v in esdf_grid_shape)
 
 
-def _resolve_origin_xyz(cfg: Any | None) -> tuple[float, float, float]:
-    if cfg is None or isinstance(cfg, int):
-        return (0.0, 0.0, 0.0)
-    origin = getattr(cfg, "origin", None)
-    if origin is None:
-        return (0.0, 0.0, 0.0)
-    if hasattr(origin, "detach"):
-        values = origin.detach().flatten().to(device="cpu").tolist()
-    else:
-        values = list(origin)
-    if len(values) != 3:
-        log_and_raise(f"origin must contain 3 values, got {origin!r}.")
-    return (float(values[0]), float(values[1]), float(values[2]))
-
-
 def _resolve_num_samples(
     cfg: Any | None,
     *,
@@ -393,7 +377,6 @@ def make_block_sparse_kernels(
     resolved_feature_grid_voxels = resolved_feature_block_grid_size**3
     resolved_grid_shape = _resolve_grid_shape(cfg)
     resolved_esdf_grid_shape = _resolve_esdf_grid_shape(cfg)
-    resolved_origin_xyz = _resolve_origin_xyz(cfg)
     resolved_voxel_size = _resolve_float_attr(cfg, "voxel_size", 1.0)
     resolved_truncation_distance = _resolve_float_attr(cfg, "truncation_distance", 0.0)
     resolved_num_samples = _resolve_num_samples(
@@ -494,13 +477,11 @@ def make_block_sparse_kernels(
     coord_exports = make_coord_kernels(
         resolved_block_size,
         grid_shape=resolved_grid_shape,
-        origin_xyz=resolved_origin_xyz,
         voxel_size=resolved_voxel_size,
     )
     decay_exports = make_decay_kernels(
         resolved_block_size,
         grid_shape=resolved_grid_shape,
-        origin_xyz=resolved_origin_xyz,
         voxel_size=resolved_voxel_size,
         num_cameras=resolved_num_cameras,
         image_height=resolved_image_height,
@@ -511,7 +492,6 @@ def make_block_sparse_kernels(
         resolved_block_size,
         color_grid_size=resolved_color_grid_size,
         grid_shape=resolved_grid_shape,
-        origin_xyz=resolved_origin_xyz,
         voxel_size=resolved_voxel_size,
         truncation_distance=resolved_truncation_distance,
         pack_key_only=hash_exports["pack_key_only"],
@@ -561,7 +541,6 @@ def make_block_sparse_kernels(
         image_width=resolved_image_width,
         num_samples=resolved_num_samples,
         grid_shape=resolved_grid_shape,
-        origin_xyz=resolved_origin_xyz,
         voxel_size=resolved_voxel_size,
         truncation_distance=resolved_truncation_distance,
         feature_grid_shape=resolved_feature_grid_shape,
@@ -590,7 +569,6 @@ def make_block_sparse_kernels(
         lidar_image_width=lidar_kernel_image_width,
         num_samples=resolved_num_samples,
         grid_shape=resolved_grid_shape,
-        origin_xyz=resolved_origin_xyz,
         voxel_size=resolved_voxel_size,
         truncation_distance=resolved_truncation_distance,
         lidar_feature_grid_shape=resolved_lidar_feature_grid_shape,
@@ -611,7 +589,6 @@ def make_block_sparse_kernels(
         resolved_block_size,
         grid_shape=resolved_grid_shape,
         esdf_grid_shape=resolved_esdf_grid_shape,
-        origin_xyz=resolved_origin_xyz,
         voxel_size=resolved_voxel_size,
         truncation_distance=resolved_truncation_distance,
         hash_lookup=hash_exports["hash_lookup"],
@@ -633,7 +610,6 @@ def make_block_sparse_kernels(
         lidar_image_width=lidar_kernel_image_width,
         num_samples=resolved_num_samples,
         grid_shape=resolved_grid_shape,
-        origin_xyz=resolved_origin_xyz,
         voxel_size=resolved_voxel_size,
         truncation_distance=resolved_truncation_distance,
         feature_grid_shape=resolved_feature_grid_shape,

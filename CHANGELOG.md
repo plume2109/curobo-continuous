@@ -71,6 +71,10 @@
   and Hugging Face CLI setup plus sequence-only download commands.
 - Add `live_volumetric_mapping_mpc.py`, a live RGB-D TSDF/ESDF mapping
   reference example with Franka MPC using a RealSense backend.
+- Add `Mapper.set_origin()` to move the map to a new grid center without
+  rebuilding the Mapper. The TSDF origin is now a runtime kernel input rather
+  than a compiled constant, so moving the center no longer triggers a Warp
+  recompile of the mapper kernels.
 
 ### Bug Fixes & Misc.
 - Reduce GPU memory consumption for batched motion planning by 3x with

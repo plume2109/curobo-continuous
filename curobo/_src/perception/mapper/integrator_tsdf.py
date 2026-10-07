@@ -503,6 +503,11 @@ class BlockSparseTSDFIntegrator:
         self._tsdf.reset()
         self._frame_count = 0
 
+    def set_origin(self, origin: torch.Tensor) -> None:
+        """Move the grid center to ``origin`` (3,) [m] and reset the map."""
+        self._tsdf.set_origin(origin)
+        self._frame_count = 0
+
     def import_blocks(self, blocks: Dict[str, torch.Tensor]) -> int:
         """Import compact block payloads into the underlying TSDF storage.
 

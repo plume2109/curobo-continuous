@@ -46,7 +46,6 @@ def make_esdf_kernels(
     *,
     grid_shape: tuple[int, int, int],
     esdf_grid_shape: tuple[int, int, int],
-    origin_xyz: tuple[float, float, float],
     voxel_size: float,
     truncation_distance: float,
     hash_lookup,
@@ -56,7 +55,7 @@ def make_esdf_kernels(
     """Build ESDF seeding and distance kernels."""
     suffix = (
         f"bs{block_size}_cfg"
-        f"{warp_constant_suffix(block_size, grid_shape, esdf_grid_shape, origin_xyz, voxel_size, truncation_distance)}"
+        f"{warp_constant_suffix(block_size, grid_shape, esdf_grid_shape, voxel_size, truncation_distance)}"
     )
     BS = wp.constant(block_size)
     GRID_D = wp.constant(wp.int32(grid_shape[0]))
@@ -65,9 +64,6 @@ def make_esdf_kernels(
     ESDF_D = wp.constant(wp.int32(esdf_grid_shape[0]))
     ESDF_H = wp.constant(wp.int32(esdf_grid_shape[1]))
     ESDF_W = wp.constant(wp.int32(esdf_grid_shape[2]))
-    TSDF_ORIGIN_X = wp.constant(wp.float32(origin_xyz[0]))
-    TSDF_ORIGIN_Y = wp.constant(wp.float32(origin_xyz[1]))
-    TSDF_ORIGIN_Z = wp.constant(wp.float32(origin_xyz[2]))
     TSDF_VOXEL_SIZE = wp.constant(wp.float32(voxel_size))
     TRUNCATION_DIST = wp.constant(wp.float32(truncation_distance))
 
@@ -111,6 +107,7 @@ def make_esdf_kernels(
         esdf_iz: wp.int32,
         esdf_origin: wp.array(dtype=wp.float32),
         esdf_vs: wp.float32,
+        tsdf_origin: wp.vec3,
     ) -> wp.vec4i:
         """Map ESDF grid coords to TSDF global voxel coords.
 
@@ -124,9 +121,9 @@ def make_esdf_kernels(
         gy = wp.int32(0)
         gz = wp.int32(0)
 
-        gx = wp.int32((world_x - TSDF_ORIGIN_X) / TSDF_VOXEL_SIZE + wp.float32(GRID_W) * 0.5)
-        gy = wp.int32((world_y - TSDF_ORIGIN_Y) / TSDF_VOXEL_SIZE + wp.float32(GRID_H) * 0.5)
-        gz = wp.int32((world_z - TSDF_ORIGIN_Z) / TSDF_VOXEL_SIZE + wp.float32(GRID_D) * 0.5)
+        gx = wp.int32((world_x - tsdf_origin[0]) / TSDF_VOXEL_SIZE + wp.float32(GRID_W) * 0.5)
+        gy = wp.int32((world_y - tsdf_origin[1]) / TSDF_VOXEL_SIZE + wp.float32(GRID_H) * 0.5)
+        gz = wp.int32((world_z - tsdf_origin[2]) / TSDF_VOXEL_SIZE + wp.float32(GRID_D) * 0.5)
         if gx < 0 or gx >= GRID_W or gy < 0 or gy >= GRID_H or gz < 0 or gz >= GRID_D:
             return wp.vec4i(0, 0, 0, 0)
 
@@ -149,6 +146,7 @@ def make_esdf_kernels(
             esdf_iz,
             esdf_origin,
             esdf_vs,
+            tsdf.origin[0],
         )
         if coords[3] == 0:
             return wp.float32(1e10)
@@ -175,6 +173,7 @@ def make_esdf_kernels(
             esdf_iz,
             esdf_origin,
             esdf_vs,
+            tsdf.origin[0],
         )
         if coords[3] == 0:
             return wp.float32(1e10)
@@ -233,14 +232,15 @@ def make_esdf_kernels(
         if sdf > 1e9:
             return
 
+        tsdf_origin = tsdf.origin[0]
         world_x = (
-            TSDF_ORIGIN_X + (wp.float32(gx) + 0.5 - wp.float32(GRID_W) * 0.5) * TSDF_VOXEL_SIZE
+            tsdf_origin[0] + (wp.float32(gx) + 0.5 - wp.float32(GRID_W) * 0.5) * TSDF_VOXEL_SIZE
         )
         world_y = (
-            TSDF_ORIGIN_Y + (wp.float32(gy) + 0.5 - wp.float32(GRID_H) * 0.5) * TSDF_VOXEL_SIZE
+            tsdf_origin[1] + (wp.float32(gy) + 0.5 - wp.float32(GRID_H) * 0.5) * TSDF_VOXEL_SIZE
         )
         world_z = (
-            TSDF_ORIGIN_Z + (wp.float32(gz) + 0.5 - wp.float32(GRID_D) * 0.5) * TSDF_VOXEL_SIZE
+            tsdf_origin[2] + (wp.float32(gz) + 0.5 - wp.float32(GRID_D) * 0.5) * TSDF_VOXEL_SIZE
         )
 
         esdf_vs = esdf_voxel_size[0]
@@ -276,9 +276,10 @@ def make_esdf_kernels(
 
         Seeds are surface or truncation-boundary voxels.
         """
-        gx = wp.int32((world_x - TSDF_ORIGIN_X) / TSDF_VOXEL_SIZE + wp.float32(GRID_W) * 0.5)
-        gy = wp.int32((world_y - TSDF_ORIGIN_Y) / TSDF_VOXEL_SIZE + wp.float32(GRID_H) * 0.5)
-        gz = wp.int32((world_z - TSDF_ORIGIN_Z) / TSDF_VOXEL_SIZE + wp.float32(GRID_D) * 0.5)
+        tsdf_origin = tsdf.origin[0]
+        gx = wp.int32((world_x - tsdf_origin[0]) / TSDF_VOXEL_SIZE + wp.float32(GRID_W) * 0.5)
+        gy = wp.int32((world_y - tsdf_origin[1]) / TSDF_VOXEL_SIZE + wp.float32(GRID_H) * 0.5)
+        gz = wp.int32((world_z - tsdf_origin[2]) / TSDF_VOXEL_SIZE + wp.float32(GRID_D) * 0.5)
         if gx < 0 or gx >= GRID_W or gy < 0 or gy >= GRID_H or gz < 0 or gz >= GRID_D:
             return False
 

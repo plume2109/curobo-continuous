@@ -7,6 +7,11 @@
 All functions here use the center-origin convention: ``origin`` is the
 center of the bounded voxel grid. Block-key coordinates are centered around
 the grid's block midpoint, while block-grid coordinates are zero-based.
+
+The origin is a runtime argument rather than a compiled constant, so moving
+the grid center does not generate new Warp modules. Kernels read it from the
+size-1 ``wp.array(dtype=wp.vec3)`` held by the TSDF storage and pass
+``origin[0]`` down to these functions.
 """
 
 from __future__ import annotations
@@ -20,21 +25,14 @@ def make_coord_kernels(
     block_size: int,
     *,
     grid_shape: tuple[int, int, int],
-    origin_xyz: tuple[float, float, float],
     voxel_size: float,
 ) -> dict[str, object]:
     """Build coordinate-conversion Warp functions."""
-    suffix = (
-        f"bs{block_size}_cfg"
-        f"{warp_constant_suffix(block_size, grid_shape, origin_xyz, voxel_size)}"
-    )
+    suffix = f"bs{block_size}_cfg{warp_constant_suffix(block_size, grid_shape, voxel_size)}"
     BLOCK_SIZE = wp.constant(block_size)
     GRID_D = wp.constant(wp.int32(grid_shape[0]))
     GRID_H = wp.constant(wp.int32(grid_shape[1]))
     GRID_W = wp.constant(wp.int32(grid_shape[2]))
-    ORIGIN_X = wp.constant(wp.float32(origin_xyz[0]))
-    ORIGIN_Y = wp.constant(wp.float32(origin_xyz[1]))
-    ORIGIN_Z = wp.constant(wp.float32(origin_xyz[2]))
     VOXEL_SIZE = wp.constant(wp.float32(voxel_size))
 
     # =====================================================================
@@ -44,37 +42,40 @@ def make_coord_kernels(
     @warp_func(f"world_to_continuous_voxel_{suffix}")
     def world_to_continuous_voxel(
         world_pos: wp.vec3,
+        origin: wp.vec3,
     ) -> wp.vec3:
         center_offset_x = wp.float32(GRID_W) * 0.5
         center_offset_y = wp.float32(GRID_H) * 0.5
         center_offset_z = wp.float32(GRID_D) * 0.5
-        vx = (world_pos[0] - ORIGIN_X) / VOXEL_SIZE + center_offset_x
-        vy = (world_pos[1] - ORIGIN_Y) / VOXEL_SIZE + center_offset_y
-        vz = (world_pos[2] - ORIGIN_Z) / VOXEL_SIZE + center_offset_z
+        vx = (world_pos[0] - origin[0]) / VOXEL_SIZE + center_offset_x
+        vy = (world_pos[1] - origin[1]) / VOXEL_SIZE + center_offset_y
+        vz = (world_pos[2] - origin[2]) / VOXEL_SIZE + center_offset_z
         return wp.vec3(vx, vy, vz)
 
     @warp_func(f"voxel_to_world_{suffix}")
     def voxel_to_world(
         voxel_idx: wp.vec3i,
+        origin: wp.vec3,
     ) -> wp.vec3:
         center_offset_x = wp.float32(GRID_W) * 0.5
         center_offset_y = wp.float32(GRID_H) * 0.5
         center_offset_z = wp.float32(GRID_D) * 0.5
-        wx = (wp.float32(voxel_idx[0]) + 0.5 - center_offset_x) * VOXEL_SIZE + ORIGIN_X
-        wy = (wp.float32(voxel_idx[1]) + 0.5 - center_offset_y) * VOXEL_SIZE + ORIGIN_Y
-        wz = (wp.float32(voxel_idx[2]) + 0.5 - center_offset_z) * VOXEL_SIZE + ORIGIN_Z
+        wx = (wp.float32(voxel_idx[0]) + 0.5 - center_offset_x) * VOXEL_SIZE + origin[0]
+        wy = (wp.float32(voxel_idx[1]) + 0.5 - center_offset_y) * VOXEL_SIZE + origin[1]
+        wz = (wp.float32(voxel_idx[2]) + 0.5 - center_offset_z) * VOXEL_SIZE + origin[2]
         return wp.vec3(wx, wy, wz)
 
     @warp_func(f"voxel_to_world_corner_{suffix}")
     def voxel_to_world_corner(
         voxel_idx: wp.vec3i,
+        origin: wp.vec3,
     ) -> wp.vec3:
         center_offset_x = wp.float32(GRID_W) * 0.5
         center_offset_y = wp.float32(GRID_H) * 0.5
         center_offset_z = wp.float32(GRID_D) * 0.5
-        wx = (wp.float32(voxel_idx[0]) - center_offset_x) * VOXEL_SIZE + ORIGIN_X
-        wy = (wp.float32(voxel_idx[1]) - center_offset_y) * VOXEL_SIZE + ORIGIN_Y
-        wz = (wp.float32(voxel_idx[2]) - center_offset_z) * VOXEL_SIZE + ORIGIN_Z
+        wx = (wp.float32(voxel_idx[0]) - center_offset_x) * VOXEL_SIZE + origin[0]
+        wy = (wp.float32(voxel_idx[1]) - center_offset_y) * VOXEL_SIZE + origin[1]
+        wz = (wp.float32(voxel_idx[2]) - center_offset_z) * VOXEL_SIZE + origin[2]
         return wp.vec3(wx, wy, wz)
 
     # =====================================================================
@@ -122,14 +123,15 @@ def make_coord_kernels(
     @warp_func(f"world_to_block_coords_{suffix}")
     def world_to_block_coords(
         world_pos: wp.vec3,
+        origin: wp.vec3,
     ) -> wp.vec3i:
         block_size_f = wp.float32(BLOCK_SIZE)
         center_offset_x = wp.float32(GRID_W) * 0.5
         center_offset_y = wp.float32(GRID_H) * 0.5
         center_offset_z = wp.float32(GRID_D) * 0.5
-        vx = (world_pos[0] - ORIGIN_X) / VOXEL_SIZE + center_offset_x
-        vy = (world_pos[1] - ORIGIN_Y) / VOXEL_SIZE + center_offset_y
-        vz = (world_pos[2] - ORIGIN_Z) / VOXEL_SIZE + center_offset_z
+        vx = (world_pos[0] - origin[0]) / VOXEL_SIZE + center_offset_x
+        vy = (world_pos[1] - origin[1]) / VOXEL_SIZE + center_offset_y
+        vz = (world_pos[2] - origin[2]) / VOXEL_SIZE + center_offset_z
         bx_grid = wp.int32(wp.floor(vx / block_size_f))
         by_grid = wp.int32(wp.floor(vy / block_size_f))
         bz_grid = wp.int32(wp.floor(vz / block_size_f))
@@ -138,14 +140,15 @@ def make_coord_kernels(
     @warp_func(f"world_to_block_and_local_{suffix}")
     def world_to_block_and_local(
         world_pos: wp.vec3,
+        origin: wp.vec3,
     ) -> wp.vec4i:
         block_size_f = wp.float32(BLOCK_SIZE)
         center_offset_x = wp.float32(GRID_W) * 0.5
         center_offset_y = wp.float32(GRID_H) * 0.5
         center_offset_z = wp.float32(GRID_D) * 0.5
-        vx = (world_pos[0] - ORIGIN_X) / VOXEL_SIZE + center_offset_x
-        vy = (world_pos[1] - ORIGIN_Y) / VOXEL_SIZE + center_offset_y
-        vz = (world_pos[2] - ORIGIN_Z) / VOXEL_SIZE + center_offset_z
+        vx = (world_pos[0] - origin[0]) / VOXEL_SIZE + center_offset_x
+        vy = (world_pos[1] - origin[1]) / VOXEL_SIZE + center_offset_y
+        vz = (world_pos[2] - origin[2]) / VOXEL_SIZE + center_offset_z
         bx_grid = wp.int32(wp.floor(vx / block_size_f))
         by_grid = wp.int32(wp.floor(vy / block_size_f))
         bz_grid = wp.int32(wp.floor(vz / block_size_f))
@@ -165,6 +168,7 @@ def make_coord_kernels(
         by: wp.int32,
         bz: wp.int32,
         local_idx: wp.int32,
+        origin: wp.vec3,
     ) -> wp.vec3:
         lx = local_idx % BLOCK_SIZE
         ly = (local_idx // BLOCK_SIZE) % BLOCK_SIZE
@@ -173,7 +177,7 @@ def make_coord_kernels(
         vx = base[0] + lx
         vy = base[1] + ly
         vz = base[2] + lz
-        return voxel_to_world(wp.vec3i(vx, vy, vz))
+        return voxel_to_world(wp.vec3i(vx, vy, vz), origin)
 
     # =====================================================================
     # Local Index Conversion

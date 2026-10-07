@@ -238,11 +238,7 @@ def stamp_obstacles(
     dims = obs_data.dims[env_idx, :n_obs]
     inv_pose = obs_data.inv_pose[env_idx, :n_obs]
 
-    origin = torch.tensor(
-        [warp_tsdf.origin[0], warp_tsdf.origin[1], warp_tsdf.origin[2]],
-        device=device,
-        dtype=dims.dtype,
-    )
+    origin = tsdf.data.origin.to(device=device, dtype=dims.dtype)
     grid_dims = (warp_tsdf.grid_W, warp_tsdf.grid_H, warp_tsdf.grid_D)
 
     bmin, bmax = compute_aabb_block_bounds(
@@ -307,6 +303,7 @@ def stamp_obstacles(
             env_idx,
             wp.from_torch(filtered_blocks, dtype=wp.int64),
             wp.from_torch(filtered_count, dtype=wp.int32),
+            warp_tsdf.origin,
         ],
         stream=stream,
     )
@@ -366,6 +363,7 @@ def stamp_obstacles(
             env_idx,
             wp.from_torch(tsdf.data.static_block_data, dtype=wp.float16),
             wp.from_torch(tsdf.data.static_block_sums, dtype=wp.int32),
+            warp_tsdf.origin,
         ],
         stream=stream,
     )

@@ -696,6 +696,7 @@ class CameraProjectIntegrator:
                 depth_min,
                 depth_max,
                 wp.from_torch(self.block_keys[:num_block_key_candidates]),
+                data.origin,
             ],
             device=device,
             stream=stream,
@@ -757,6 +758,7 @@ class CameraProjectIntegrator:
                 depth_max,
                 data.block_coords,
                 data.block_data,
+                data.origin,
             ],
             device=device,
             stream=stream,
@@ -780,6 +782,7 @@ class CameraProjectIntegrator:
                 depth_max,
                 data.block_coords,
                 data.block_grid_rgb,
+                data.origin,
             ],
             device=device,
             stream=stream,
@@ -851,6 +854,7 @@ class CameraProjectIntegrator:
                 data.block_coords,
                 data.block_features,
                 data.block_feature_weight,
+                data.origin,
             ]
             feature_channel_groups = (
                 feature_dim_cfg + self.feature_channels_per_thread - 1

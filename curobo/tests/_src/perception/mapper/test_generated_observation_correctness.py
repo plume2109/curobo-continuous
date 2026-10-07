@@ -76,6 +76,7 @@ def _make_mapper(
     decay_factor: float = 1.0,
     frustum_decay_factor: float = 1.0,
     profile_kernel_timings: bool = False,
+    grid_center: tuple[float, float, float] = (0.0, 0.0, PLANE_Z),
 ) -> Mapper:
     feature_grid_kwargs = {}
     if feature_dim > 0:
@@ -89,7 +90,7 @@ def _make_mapper(
             extent_esdf_meters_xyz=(1.0, 0.8, 0.8),
             voxel_size=VOXEL_SIZE,
             esdf_voxel_size=0.04,
-            grid_center=torch.tensor([0.0, 0.0, PLANE_Z], dtype=torch.float32),
+            grid_center=torch.tensor(grid_center, dtype=torch.float32),
             truncation_distance=0.04,
             depth_minimum_distance=0.1,
             depth_maximum_distance=3.0,
@@ -619,6 +620,52 @@ def test_plane_surface_and_esdf_distance_are_voxel_accurate(warp_init, device):
         atol=0.05,
         rtol=0.0,
     )
+
+
+def _map_snapshot(mapper: Mapper) -> dict[str, torch.Tensor]:
+    """TSDF blocks sorted by key, ESDF, and sorted occupied voxels of a mapper."""
+    blocks = mapper.tsdf.export_blocks()
+    keys = blocks["active_block_coords"].long()
+    order = torch.argsort((keys[:, 0] * 4096 + keys[:, 1]) * 4096 + keys[:, 2])
+    voxel_grid = mapper.compute_esdf()
+    occupied = mapper.extract_occupied_voxels(surface_only=False).centers
+    occupied_order = torch.argsort(
+        occupied[:, 0] * 1.0e6 + occupied[:, 1] * 1.0e3 + occupied[:, 2]
+    )
+    return {
+        "block_keys": keys[order],
+        "block_data": blocks["block_data"][order],
+        "esdf": voxel_grid.feature_tensor.clone(),
+        "esdf_pose": torch.as_tensor(voxel_grid.pose, dtype=torch.float32),
+        "occupied": occupied[occupied_order],
+    }
+
+
+def test_set_origin_matches_mapper_built_at_new_center(warp_init, device):
+    """set_origin() on a warm mapper gives the same map as a fresh mapper at that center."""
+    new_center = (0.013, -0.027, PLANE_Z + 0.031)
+    depth = torch.full((IMAGE_H, IMAGE_W), PLANE_Z, dtype=torch.float32, device=device)
+    depth[8:16, 10:20] = PLANE_Z - 0.2
+    rgb = torch.full((IMAGE_H, IMAGE_W, 3), 90, dtype=torch.uint8, device=device)
+    obs = _observation(device=device, depth=depth, rgb=rgb)
+
+    expected_mapper = _make_mapper(device, grid_center=new_center)
+    expected_mapper.integrate(obs)
+    expected = _map_snapshot(expected_mapper)
+
+    mapper = _make_mapper(device)
+    mapper.integrate(obs)
+    _map_snapshot(mapper)  # warm kernels and the ESDF CUDA graph on the old center
+    mapper.set_origin(torch.tensor(new_center))
+    assert mapper.tsdf.data.num_allocated.item() == 0
+    mapper.integrate(obs)
+    actual = _map_snapshot(mapper)
+
+    assert expected["block_keys"].shape[0] > 0
+    assert expected["occupied"].shape[0] > 0
+    for name, value in expected.items():
+        assert torch.equal(actual[name], value), name
+    assert torch.equal(mapper.config.grid_center, torch.tensor(new_center))
 
 
 def test_tilted_plane_surface_matches_analytic_plane(warp_init, device):

@@ -191,7 +191,6 @@ class TestKernelBuilderConstruction:
         ("field", "value", "match"),
         [
             ("grid_shape", (64, 128, 128), "grid_shape"),
-            ("origin", torch.tensor([-0.5, -1.0, 0.0]), "origin_xyz"),
             ("voxel_size", 0.02, "voxel_size"),
             ("truncation_distance", 0.08, "truncation_distance"),
         ],
@@ -216,6 +215,35 @@ class TestKernelBuilderConstruction:
 
         with pytest.raises(AssertionError, match=match):
             BlockSparseTSDF(cfg, kernels=kernels)
+
+    def test_kernels_do_not_depend_on_origin(self, warp_init, device):
+        """The origin is a runtime value: one kernel bundle serves any grid center."""
+        base_kwargs = {
+            "voxel_size": 0.01,
+            "truncation_distance": 0.04,
+            "max_blocks": 100,
+            "device": device,
+            "grid_shape": (128, 128, 128),
+        }
+        cfg_a = BlockSparseTSDFCfg(origin=torch.tensor([-1.0, -1.0, 0.0]), **base_kwargs)
+        cfg_b = BlockSparseTSDFCfg(origin=torch.tensor([0.3, -0.2, 0.7]), **base_kwargs)
+        kernels_a = make_block_sparse_kernels(cfg_a)
+        kernels_b = make_block_sparse_kernels(cfg_b)
+
+        for name in (
+            "world_to_block_coords",
+            "compute_block_keys_only_kernel",
+            "integrate_voxels_kernel",
+            "collect_blocks_in_aabb_kernel",
+            "extract_occupied_voxels_kernel",
+            "seed_esdf_sites_gather_kernel",
+            "mark_blocks_in_frustum_kernel",
+            "stamp_sdf_kernel",
+        ):
+            assert getattr(kernels_a, name).key == getattr(kernels_b, name).key, name
+
+        tsdf = BlockSparseTSDF(cfg_b, kernels=kernels_a)
+        assert torch.equal(tsdf.data.origin.cpu(), cfg_b.origin.cpu())
 
     def test_seeding_method_is_python_policy(self, warp_init):
         k_g = make_block_sparse_kernels(block_size=8, seeding_method="gather")
