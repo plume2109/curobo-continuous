@@ -200,8 +200,21 @@ class LBFGScu(Function):
         epsilon=0.1,
         stable_mode=False,
         use_shared_buffers=True,
+        action_step_max=None,
     ):
+        """Compute the L-BFGS step direction and update the history buffers in place.
+
+        When ``action_step_max`` is given, each problem's step is divided by
+        ``max(1, max_i |step_i| / action_step_max[i % action_dim])`` inside the kernel,
+        matching :meth:`LineSearchStrategy.scale_action`. ``action_step_max`` has shape
+        ``(action_dim,)``.
+        """
         device = step_vec.device
+        scale_step = action_step_max is not None
+        if scale_step:
+            check_float32_tensors(device, action_step_max=action_step_max)
+        else:
+            action_step_max = step_vec
         check_float32_tensors(
             device,
             step_vec=step_vec,
@@ -229,6 +242,8 @@ class LBFGScu(Function):
             v_dim,
             stable_mode,
             use_shared_buffers,
+            action_step_max,
+            scale_step,
         )
         step_v = R[0].view(step_vec.shape)
 

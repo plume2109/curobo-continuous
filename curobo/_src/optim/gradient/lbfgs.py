@@ -190,6 +190,12 @@ class LBFGSOpt:
             log_info("LBFGS: history >= opt_dim, reducing history to opt_dim-1")
             config.history = opt_dim
 
+        # The CUDA kernel scales the step to the action step limits, replacing the line
+        # search's PyTorch scaling.
+        self._scale_step_in_kernel = config.use_cuda_kernel_step_direction and (
+            config.step_scale != 0.0 and config.step_scale != 1.0
+        )
+
         self._core = GradientOptCore(
             config,
             rollout_list,
@@ -199,6 +205,7 @@ class LBFGSOpt:
             on_resize=self._on_resize,
             on_shift=self._on_shift,
             use_cuda_graph=use_cuda_graph,
+            step_direction_prescaled=self._scale_step_in_kernel,
         )
         self._core.update_num_problems(config.num_problems)
         self._core.finish_init()
@@ -226,6 +233,7 @@ class LBFGSOpt:
                     self._core.config.epsilon,
                     self._core.config.stable_mode,
                     self._core.config.use_cuda_kernel_shared_buffers,
+                    self._core.action_step_max if self._scale_step_in_kernel else None,
                 )
         else:
             self._update_buffers(q, grad_q)

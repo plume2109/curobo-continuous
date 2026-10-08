@@ -172,8 +172,9 @@ class LineSearchStrategy(ABC):
 
         step_direction = step_direction.detach()
 
-        if (context.step_scale != 0.0 and context.step_scale != 1.0) or (
-            context.fix_terminal_action and context.action_horizon > 1
+        if not context.step_direction_prescaled and (
+            (context.step_scale != 0.0 and context.step_scale != 1.0)
+            or (context.fix_terminal_action and context.action_horizon > 1)
         ):
             step_direction = self.scale_action(
                 step_direction,

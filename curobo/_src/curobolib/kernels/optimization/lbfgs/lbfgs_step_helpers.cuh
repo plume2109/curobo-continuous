@@ -707,6 +707,35 @@ namespace lbfgs{
         }
     }
 
+    /**
+     * @brief Scales a problem's step so that no action dimension exceeds its step limit
+     *
+     * Computes scale = max(1, max_i |step_i| / action_step_max[i % action_dim]) over the
+     * block and returns step / scale. Matches LineSearchStrategy.scale_action.
+     *
+     * @param step Step value held by this thread
+     * @param action_step_max Maximum step per action dimension. Shape: (action_dim)
+     * @param action_dim Action dimension; v_dim is action_horizon * action_dim
+     * @param v_dim Optimization dimension size
+     * @param data Shared memory buffer for reductions
+     * @param result Shared memory for reduction results
+     * @return Scaled step value for this thread
+     */
+    template<typename ScalarType>
+    __device__ __forceinline__ ScalarType scale_step_to_action_step_max(
+        const ScalarType step,
+        const ScalarType* action_step_max,
+        const int action_dim,
+        const int v_dim,
+        ScalarType* data,
+        ScalarType* result)
+    {
+        const ScalarType ratio = fabsf(step) / action_step_max[threadIdx.x % action_dim];
+        curobo::common::block_reduce_max(ratio, v_dim, &data[0], result);
+        const ScalarType scale = fmaxf(result[0], 1.0f);
+        return step / scale;
+    }
+
 } // namespace lbfgs
 } // namespace optimization
 } // namespace curobo

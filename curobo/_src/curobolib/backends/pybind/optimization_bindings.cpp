@@ -61,7 +61,9 @@ void launch_line_search(
                   const int     m,
                   const int     v_dim,
                   const bool    stable_mode,
-                  const bool use_shared_buffers);
+                  const bool use_shared_buffers,
+                  torch::Tensor action_step_max,
+                  const bool    scale_step);
 
   }
 }

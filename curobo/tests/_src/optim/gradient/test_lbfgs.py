@@ -574,3 +574,66 @@ def test_convergence_comparison(optimizer_setup):
     # Both results should be close in terms of final cost
     # We use a relative tolerance to account for different magnitudes
     assert final_cost_cuda == final_cost_no_cuda
+
+
+@pytest.mark.parametrize("history", [5, 27])
+@pytest.mark.parametrize("use_shared_buffers", [True, False])
+def test_lbfgs_kernel_step_scaling_matches_scale_action(history, use_shared_buffers):
+    """The L-BFGS kernel's in-kernel step scaling matches LineSearchStrategy.scale_action."""
+    from curobo._src.curobolib.cuda_ops.optimization import LBFGScu
+    from curobo._src.optim.gradient.line_search_strategy import LineSearchStrategy
+
+    torch.manual_seed(0)
+    device = torch.device("cuda:0")
+    batch, action_horizon, action_dim = 4, 16, 14
+    opt_dim = action_horizon * action_dim
+
+    def make_inputs():
+        gen = torch.Generator(device=device).manual_seed(1)
+
+        def randn(*shape):
+            return torch.randn(*shape, device=device, generator=gen)
+
+        # Curvature pairs of a diagonal SPD quadratic, so the two-loop recursion is well posed.
+        curvature = 0.5 + torch.rand(batch, opt_dim, 1, device=device, generator=gen)
+        s_buffer = randn(history, batch, opt_dim, 1)
+        y_buffer = curvature * s_buffer
+        rho_buffer = 1.0 / torch.sum(y_buffer * s_buffer, dim=2, keepdim=True)
+        # Problems span step magnitudes below and above the step limit.
+        magnitude = torch.tensor([1e-3, 1.0, 10.0, 100.0], device=device).view(batch, 1, 1)
+        x_0 = randn(batch, opt_dim, 1)
+        q = x_0 + randn(batch, opt_dim, 1)
+        grad_0 = randn(batch, opt_dim, 1) * magnitude
+        grad_q = grad_0 + curvature * (q - x_0)
+        return dict(
+            step_vec=torch.zeros((batch, opt_dim), device=device),
+            rho_buffer=rho_buffer,
+            y_buffer=y_buffer,
+            s_buffer=s_buffer,
+            q=q.view(batch, opt_dim),
+            grad_q=grad_q.view(batch, 1, opt_dim),
+            x_0=x_0,
+            grad_0=grad_0,
+        )
+
+    action_step_max = 0.98 * torch.linspace(0.5, 2.0, action_dim, device=device)
+
+    ref = make_inputs()
+    step_ref = LBFGScu.apply(*ref.values(), 0.1, False, use_shared_buffers).clone()
+    step_ref = LineSearchStrategy.scale_action(
+        step_ref.view(batch, action_horizon, action_dim), action_step_max, 0.98, False,
+        action_horizon,
+    )
+
+    fused = make_inputs()
+    step_fused = LBFGScu.apply(
+        *fused.values(), 0.1, False, use_shared_buffers, action_step_max
+    ).view(batch, action_horizon, action_dim)
+
+    assert torch.isfinite(step_ref).all()
+    assert torch.allclose(step_fused, step_ref, rtol=1e-5, atol=1e-7)
+    ratio = (step_fused.abs() / action_step_max).amax(dim=(1, 2))
+    assert torch.all(ratio <= 1.0 + 1e-5)
+    # History buffers are unaffected by the step scaling.
+    for key in ("rho_buffer", "y_buffer", "s_buffer", "x_0", "grad_0"):
+        assert torch.equal(fused[key], ref[key]), key

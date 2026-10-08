@@ -22,7 +22,10 @@ from curobo._src.optim.components.action_bounds import ActionBounds
 from curobo._src.optim.components.best_tracker import BestTracker
 from curobo._src.optim.components.debug_recorder import DebugRecorder
 from curobo._src.optim.gradient.line_search_context import LineSearchContext
-from curobo._src.optim.gradient.line_search_strategy import LineSearchStrategyFactory
+from curobo._src.optim.gradient.line_search_strategy import (
+    LineSearchStrategy,
+    LineSearchStrategyFactory,
+)
 from curobo._src.optim.optimization_iteration_state import OptimizationIterationState
 from curobo._src.rollout.rollout_protocol import Rollout
 from curobo._src.util.cuda_event_timer import CudaEventTimer
@@ -56,6 +59,7 @@ class GradientOptCore:
         on_resize: Optional[Callable] = None,
         on_shift: Optional[Callable] = None,
         use_cuda_graph: bool = False,
+        step_direction_prescaled: bool = False,
     ):
         """Initialize gradient optimizer core with rollouts, callbacks, and config.
 
@@ -85,6 +89,9 @@ class GradientOptCore:
             use_cuda_graph: If True, CUDA graph executors are created for
                 ``_opt_iters`` and ``_prepare_initial_iteration_state``
                 after :meth:`finish_init` is called.
+            step_direction_prescaled: If True, ``step_direction_fn`` returns
+                steps already scaled by :attr:`action_step_max`, so the line
+                search skips its own step scaling.
         """
         if len(rollout_list) != config.num_rollout_instances:
             log_and_raise(
@@ -96,6 +103,7 @@ class GradientOptCore:
         self.device_cfg = config.device_cfg
         self.opt_dt = 0.0
         self.use_cuda_graph = use_cuda_graph
+        self._step_direction_prescaled = step_direction_prescaled
         self._enabled = True
         self._iteration_state: Optional[OptimizationIterationState] = None
         self._og_num_iters = config.num_iters
@@ -436,6 +444,14 @@ class GradientOptCore:
         initial_step_direction = (
             -self.config.initial_step_scale * iteration_state.exploration_gradient
         )
+        if self._line_search_context.step_direction_prescaled:
+            initial_step_direction = LineSearchStrategy.scale_action(
+                initial_step_direction,
+                self._line_search_context.action_horizon_step_max,
+                self.config.step_scale,
+                False,
+                self.action_horizon,
+            )
         iteration_state.step_direction.copy_(initial_step_direction)
         return iteration_state
 
@@ -582,7 +598,9 @@ class GradientOptCore:
         )
 
         if self._line_search_context is None:
-            self._line_search_context = self._create_line_search_context()
+            self._line_search_context = self._create_line_search_context(
+                step_direction_prescaled=self._step_direction_prescaled
+            )
             self._line_search_strategy = LineSearchStrategyFactory.get_strategy(
                 self.config.line_search_type
             )
@@ -610,7 +628,7 @@ class GradientOptCore:
             )
 
     def _create_line_search_context(
-        self, compute_costs_and_gradients=None
+        self, compute_costs_and_gradients=None, step_direction_prescaled: bool = False
     ) -> LineSearchContext:
         if compute_costs_and_gradients is None:
             compute_costs_and_gradients = self._compute_cost_constraint_and_gradient
@@ -631,6 +649,7 @@ class GradientOptCore:
             convergence_iteration=self.config.convergence_iteration,
             cost_delta_threshold=self.config.cost_delta_threshold,
             cost_relative_threshold=self.config.cost_relative_threshold,
+            step_direction_prescaled=step_direction_prescaled,
         )
 
     def update_rollout_params(self, goal):

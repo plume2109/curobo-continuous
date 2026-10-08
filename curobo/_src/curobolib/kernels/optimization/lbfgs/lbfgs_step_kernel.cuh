@@ -26,7 +26,9 @@ __global__ void kernel_lbfgs_step(
   ScalarType *grad_0,       // b x 175
   const ScalarType *grad_q, // b x 175
   const float epsilon, const int batchsize, const int m, const int v_dim,
-  const bool stable_mode = false)                // s_buffer and y_buffer are not rolled by default
+  const bool stable_mode = false,                // s_buffer and y_buffer are not rolled by default
+  const ScalarType *action_step_max = nullptr, // action_dim; nullptr skips step scaling
+  const int action_dim = 1)
 {
   extern __shared__ float alpha_buffer_sh[];
 
@@ -84,9 +86,15 @@ __global__ void kernel_lbfgs_step(
       threadIdx.x, batch, batchsize, v_dim, effective_m, gq, s_buffer, y_buffer,
       rho_buffer, alpha_buffer_sh, &data[0], &result);
 
+  ScalarType step = -gq;
+  if (action_step_max != nullptr)
+  {
+    step = curobo::optimization::lbfgs::scale_step_to_action_step_max(
+        step, action_step_max, action_dim, v_dim, &data[0], &result);
+  }
 
   // Store final step direction
-  step_vec[batch * v_dim + threadIdx.x] = -gq;
+  step_vec[batch * v_dim + threadIdx.x] = step;
 }
 
 
@@ -102,7 +110,9 @@ __global__ void kernel_lbfgs_step_shared_memory(
   ScalarType *grad_0,       // b x 175
   const ScalarType *grad_q, // b x 175
   const float epsilon, const int batchsize, const int lbfgs_history, const int v_dim,
-  const bool stable_mode = false)                // s_buffer and y_buffer are not rolled by default
+  const bool stable_mode = false,                // s_buffer and y_buffer are not rolled by default
+  const ScalarType *action_step_max = nullptr, // action_dim; nullptr skips step scaling
+  const int action_dim = 1)
 {
   extern __shared__ float my_smem_rc[];
 
@@ -192,10 +202,15 @@ __global__ void kernel_lbfgs_step_shared_memory(
       gq, s_buffer_sh, y_buffer_sh, rho_buffer_sh,
       alpha_buffer_sh, &data[0], &result[0]);
 
-
+  ScalarType step = -gq;
+  if (action_step_max != nullptr)
+  {
+    step = curobo::optimization::lbfgs::scale_step_to_action_step_max(
+        step, action_step_max, action_dim, v_dim, &data[0], &result[0]);
+  }
 
   // Store final step direction
-  step_vec[batch * v_dim + threadIdx.x] = -gq;
+  step_vec[batch * v_dim + threadIdx.x] = step;
 }
 }
 }

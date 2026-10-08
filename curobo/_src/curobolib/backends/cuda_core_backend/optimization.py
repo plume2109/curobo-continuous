@@ -150,6 +150,8 @@ def launch_lbfgs_step(
     v_dim: int,
     stable_mode: bool,
     use_shared_buffers: bool,
+    action_step_max: torch.Tensor,
+    scale_step: bool,
 ) -> List[torch.Tensor]:
     """Launch LBFGS step kernel using cuda.core runtime compilation.
 
@@ -251,6 +253,9 @@ def launch_lbfgs_step(
         history_m,
         v_dim,
         stable_mode,
+        # Step scaling is skipped when the kernel receives a null action_step_max.
+        action_step_max.data_ptr() if scale_step else 0,
+        action_step_max.numel() if scale_step else 1,
     )
 
     # Launch kernel

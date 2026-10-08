@@ -69,7 +69,7 @@ template<typename ScalarType, bool rolled_ys>
 struct LBFGSKernelPair {
     using SharedKernel = void(*)(ScalarType*, ScalarType*, ScalarType*, ScalarType*,
                                 ScalarType*, ScalarType*, ScalarType*, const ScalarType*,
-                                float, int, int, int, bool);
+                                float, int, int, int, bool, const ScalarType*, int);
     using StableKernel = SharedKernel;  // Same signature
 
     SharedKernel shared_memory_kernel;
@@ -226,7 +226,8 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
                 torch::Tensor y_buffer, torch::Tensor s_buffer, torch::Tensor q,
                 torch::Tensor grad_q, torch::Tensor x_0, torch::Tensor grad_0,
                 const float epsilon, const int batch_size, const int history_m,
-                const int v_dim, const bool stable_mode, const bool use_shared_buffers)
+                const int v_dim, const bool stable_mode, const bool use_shared_buffers,
+                torch::Tensor action_step_max, const bool scale_step)
 {
     // Validate all inputs
     curobo::common::validate_cuda_input(step_vec, "step_vec");
@@ -237,6 +238,12 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
     curobo::common::validate_cuda_input(x_0, "x_0");
     curobo::common::validate_cuda_input(grad_0, "grad_0");
     curobo::common::validate_cuda_input(grad_q, "grad_q");
+    if (scale_step) {
+        curobo::common::validate_cuda_input(action_step_max, "action_step_max");
+    }
+    // Step scaling is skipped when the kernel receives a null action_step_max.
+    const float* action_step_max_ptr = scale_step ? action_step_max.data_ptr<float>() : nullptr;
+    const int action_dim = scale_step ? static_cast<int>(action_step_max.numel()) : 1;
 
     // Basic validation
     assert(v_dim < 1024 && history_m < 32);
@@ -265,7 +272,8 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
             x_0.data_ptr<float>(),
             grad_0.data_ptr<float>(),
             grad_q.data_ptr<float>(),
-            epsilon, batch_size, history_m, v_dim, stable_mode);
+            epsilon, batch_size, history_m, v_dim, stable_mode,
+            action_step_max_ptr, action_dim);
     } else {
         const int basic_smem_size = history_m * v_dim * sizeof(float);
         kernel_pair.stable_kernel<<<config.blocksPerGrid, config.threadsPerBlock, basic_smem_size, stream>>>(
@@ -277,7 +285,8 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
             x_0.data_ptr<float>(),
             grad_0.data_ptr<float>(),
             grad_q.data_ptr<float>(),
-            epsilon, batch_size, history_m, v_dim, stable_mode);
+            epsilon, batch_size, history_m, v_dim, stable_mode,
+            action_step_max_ptr, action_dim);
     }
 
     C10_CUDA_KERNEL_LAUNCH_CHECK();

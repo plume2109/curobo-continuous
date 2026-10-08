@@ -46,6 +46,10 @@ class LineSearchContext:
     #: Threshold relative difference in cost to store as new best. rel = (cost_best - cost_new)/ cost_best
     cost_relative_threshold: float
 
+    #: Step directions arrive already scaled by action_horizon_step_max (e.g. by the L-BFGS
+    #: CUDA kernel), so the line search skips its own step scaling.
+    step_direction_prescaled: bool = False
+
     def __post_init__(self):
         if isinstance(self.line_search_scale, List):
             self.line_search_scale = self._create_box_line_search(self.line_search_scale)
