@@ -106,6 +106,48 @@ def compute_position_error(
 
 
 @wp.func
+def axes_mask(dof_weight: wp.vec3):
+    """1.0 on every axis with a non-zero weight, 0.0 elsewhere."""
+    return wp.vec3(
+        wp.where(dof_weight[0] != 0.0, 1.0, 0.0),
+        wp.where(dof_weight[1] != 0.0, 1.0, 0.0),
+        wp.where(dof_weight[2] != 0.0, 1.0, 0.0),
+    )
+
+
+@wp.func
+def compute_reported_position_error(
+    current_position: wp.vec3,
+    goal_position: wp.vec3,
+    dof_weight: wp.vec3,
+):
+    """Position error in metres over the tracked axes, for convergence reporting.
+
+    Masks by which axes are tracked instead of scaling by their weight: the weight shapes the
+    cost, not the distance. Scaling by it would report a non-terminal horizon step (weight
+    factor e.g. 0.001 in MPC) as 1000x closer than it is.
+    """
+    return wp.length(wp.cw_mul(axes_mask(dof_weight), current_position - goal_position))
+
+
+@wp.func
+def compute_reported_rotation_error(
+    current_quat: wp.quat,
+    goal_quat: wp.quat,
+    rotation_dof_weight: wp.vec3,
+):
+    """Rotation error in radians over the tracked axes, for convergence reporting.
+
+    Same masking as compute_reported_position_error. With every axis tracked this is the
+    geometric angle between the two quaternions.
+    """
+    quaternion_delta = wp.mul(current_quat, wp.quat_inverse(goal_quat))
+    v = wp.vec3(quaternion_delta[0], quaternion_delta[1], quaternion_delta[2])
+    v = wp.cw_mul(axes_mask(rotation_dof_weight), v)
+    return 2.0 * wp.atan2(wp.length(v), wp.abs(quaternion_delta[3]))
+
+
+@wp.func
 def convert_angular_velocity_to_quaternion_rate(angular_velocity: wp.vec3, current_quat: wp.quat):
     """Convert angular velocity to quaternion rate.
 
@@ -562,6 +604,8 @@ def create_goalset_pose_distance_kernel_with_constants(
         best_rotation_gradient = wp.vec3(0.0, 0.0, 0.0)
         best_current_quaternion = wp.quat(0.0, 0.0, 0.0, 1.0)
         best_angle = wp.float32(-1)
+        best_reported_position_error = wp.float32(0.0)
+        best_reported_rotation_error = wp.float32(0.0)
 
         current_position_in_frame = wp.vec3(0.0, 0.0, 0.0)
         current_quaternion_in_frame = wp.quat(0.0, 0.0, 0.0, 1.0)
@@ -639,6 +683,12 @@ def create_goalset_pose_distance_kernel_with_constants(
                 if local_project_distance_to_goal == 1:
                     best_g_transform = g_transform
                 best_angle = angle
+                best_reported_position_error = compute_reported_position_error(
+                    current_position_in_frame, goal_position_in_frame, position_axes_weight
+                )
+                best_reported_rotation_error = compute_reported_rotation_error(
+                    current_quaternion_in_frame, goal_quaternion_in_frame, rotation_axes_weight
+                )
 
         scaled_linear_distance = wp.float32(0.0)
         scaled_angular_distance = wp.float32(0.0)
@@ -651,15 +701,16 @@ def create_goalset_pose_distance_kernel_with_constants(
             best_position_gradient = wp.transform_vector(best_g_transform, best_position_gradient)
             best_rotation_gradient = wp.transform_vector(best_g_transform, best_rotation_gradient)
 
-        # Compute weight-independent error reporting for convergence checking
-        # Extract the weighted geometric distance by removing only the position/rotation weight scaling
-        # This gives ||weighted_position_delta|| and ||weighted_rotation_error|| which are weight-independent
+        # Weight-independent error reporting for convergence checking: metres / radians over
+        # the tracked axes of the selected goal. Derived from the pose, not from the cost --
+        # recovering it from best_position_distance / best_angle would keep the per-axis weight
+        # in, so a non-terminal step reported error * non_terminal weight factor.
         geometric_position_distance = (
-            wp.sqrt(2.0 * best_position_distance / position_weight)
-            if position_weight > 0.0
-            else 0.0
+            best_reported_position_error if position_weight > 0.0 else 0.0
         )
-        geometric_rotation_distance = best_angle  # best_angle is already weight-independent
+        geometric_rotation_distance = (
+            best_reported_rotation_error if rotation_weight > 0.0 else 0.0
+        )
 
         quaternion_rate_gradient = convert_angular_velocity_to_quaternion_rate(
             best_rotation_gradient, best_current_quaternion

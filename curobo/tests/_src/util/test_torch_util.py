@@ -6,6 +6,7 @@
 from unittest.mock import patch
 
 # Third Party
+import pytest
 import torch
 from packaging import version
 
@@ -19,6 +20,7 @@ from curobo._src.util.torch_util import (
     is_cuda_graph_available,
     is_cuda_graph_reset_available,
     is_torch_compile_available,
+    record_function_if_profiling,
     set_torch_compile_global_options,
 )
 
@@ -299,3 +301,43 @@ class TestDecorators:
         finally:
             curobo_runtime.profiler = original_value
 
+
+
+class TestRecordFunctionIfProfiling:
+    """record_function_if_profiling: free without a profiler, unchanged traces with one."""
+
+    def test_decorator_returns_result_and_keeps_metadata(self):
+        @record_function_if_profiling("test/decorated")
+        def add(a, b):
+            """Adds."""
+            return a + b
+
+        assert add(2, 3) == 5
+        assert add.__name__ == "add"
+        assert add.__doc__ == "Adds."
+
+    def test_ranges_recorded_under_profiler(self):
+        @record_function_if_profiling("test/decorated_range")
+        def work():
+            return torch.ones(1) + 1
+
+        with torch.profiler.profile() as prof:
+            work()
+            with record_function_if_profiling("test/context_range"):
+                torch.ones(1) * 2
+        names = {event.name for event in prof.events()}
+        assert "test/decorated_range" in names
+        assert "test/context_range" in names
+
+    def test_no_range_opened_without_profiler(self):
+        scope = record_function_if_profiling("test/idle")
+        with scope:
+            assert scope._range is None
+
+    def test_exception_propagates_and_range_closes(self):
+        scope = record_function_if_profiling("test/raises")
+        with torch.profiler.profile():
+            with pytest.raises(ValueError):
+                with scope:
+                    raise ValueError("boom")
+        assert scope._range is None

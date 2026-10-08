@@ -14,7 +14,6 @@ from typing import Dict, Optional, Tuple
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.optim.util.levenberg_marquardt_step import (
     LevenbergMarquardtState,
@@ -43,6 +42,7 @@ from curobo._src.solver.seed_ik.seed_ik_error_calculator import SeedIKErrorCalcu
 from curobo._src.solver.seed_ik.seed_ik_solver_cfg import SeedIKSolverCfg
 from curobo._src.solver.seed_ik.seed_ik_state import SeedIKState
 from curobo._src.solver.seed_ik.seed_iteration_state_manager import SeedIterationStateManager
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class SeedIKSolver:
@@ -217,7 +217,7 @@ class SeedIKSolver:
             action_max=self.action_max,
         )
 
-    @profiler.record_function("seed_ik_solver/compute_pose_error_and_jacobian")
+    @record_function_if_profiling("seed_ik_solver/compute_pose_error_and_jacobian")
     def _compute_pose_error_and_jacobian(
         self,
         joint_position: torch.Tensor,
@@ -270,7 +270,7 @@ class SeedIKSolver:
             iteration_state = self._levenberg_marquardt_step_impl(iteration_state, goal_tool_poses)
         return iteration_state
 
-    @profiler.record_function("seed_ik_solver/levenberg_marquardt_step_fn")
+    @record_function_if_profiling("seed_ik_solver/levenberg_marquardt_step_fn")
     def _levenberg_marquardt_step_impl(
         self,
         current_iteration_state: SeedIKState,
@@ -308,7 +308,7 @@ class SeedIKSolver:
         )
         return new_iteration_state
 
-    @profiler.record_function("seed_ik_solver/_check_convergence")
+    @record_function_if_profiling("seed_ik_solver/_check_convergence")
     @get_torch_jit_decorator(only_valid_for_compile=True)
     def _check_convergence(
         self,
@@ -374,7 +374,7 @@ class SeedIKSolver:
 
         return self._goal_tool_poses_buffer
 
-    @profiler.record_function("seed_ik_solver/_optimize")
+    @record_function_if_profiling("seed_ik_solver/_optimize")
     def _optimize(
         self,
         initial_config: torch.Tensor,  # (batch, num_seeds, dof)
@@ -454,7 +454,7 @@ class SeedIKSolver:
         else:
             return self._compute_pose_error_and_jacobian(joint_position, goal_tool_poses)
 
-    @profiler.record_function("seed_ik_solver/_calculate_exit_condition")
+    @record_function_if_profiling("seed_ik_solver/_calculate_exit_condition")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def _calculate_exit_condition(
         self,
@@ -520,7 +520,7 @@ class SeedIKSolver:
 
         return seeds
 
-    @profiler.record_function("seed_ik_solver/_select_top_solutions")
+    @record_function_if_profiling("seed_ik_solver/_select_top_solutions")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def _select_top_solutions(
         self,
@@ -735,7 +735,7 @@ class SeedIKSolver:
 
         return result
 
-    @profiler.record_function("seed_ik_solver/solve_single")
+    @record_function_if_profiling("seed_ik_solver/solve_single")
     def solve_single(
         self,
         goal_tool_poses: GoalToolPose,
@@ -762,7 +762,7 @@ class SeedIKSolver:
         )
         return result
 
-    @profiler.record_function("seed_ik_solver/solve_batch")
+    @record_function_if_profiling("seed_ik_solver/solve_batch")
     def solve_batch(
         self,
         goal_tool_poses: GoalToolPose,

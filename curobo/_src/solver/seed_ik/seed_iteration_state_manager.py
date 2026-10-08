@@ -12,11 +12,11 @@ from dataclasses import dataclass
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 # CuRobo
 from curobo._src.solver.seed_ik.seed_ik_state import SeedIKState
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class SeedIterationStateManager:
@@ -70,7 +70,7 @@ class SeedIterationStateManager:
         self.convergence_orientation_tolerance = convergence_orientation_tolerance
         self.convergence_joint_limit_weight = convergence_joint_limit_weight
 
-    @profiler.record_function("iteration_state_manager/update_state")
+    @record_function_if_profiling("iteration_state_manager/update_state")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def update_iteration_state(
         self,
@@ -123,7 +123,7 @@ class SeedIterationStateManager:
             jacobian=selected_values.jacobian,
         )
 
-    @profiler.record_function("iteration_state_manager/calculate_trust_ratio")
+    @record_function_if_profiling("iteration_state_manager/calculate_trust_ratio")
     @get_torch_jit_decorator(only_valid_for_compile=True)
     def _calculate_trust_region_ratio(
         self,
@@ -143,7 +143,7 @@ class SeedIterationStateManager:
         )
         return actual_reduction / safe_predicted_reduction
 
-    @profiler.record_function("iteration_state_manager/determine_step_acceptance")
+    @record_function_if_profiling("iteration_state_manager/determine_step_acceptance")
     @get_torch_jit_decorator(only_valid_for_compile=True)
     def _determine_step_acceptance(
         self,
@@ -153,7 +153,7 @@ class SeedIterationStateManager:
         """Determine whether to accept the proposed step."""
         return (trust_ratio >= self.rho_min).view(batch_size)
 
-    @profiler.record_function("iteration_state_manager/update_damping")
+    @record_function_if_profiling("iteration_state_manager/update_damping")
     @get_torch_jit_decorator(only_valid_for_compile=True)
     def _update_damping_parameter(
         self,
@@ -186,7 +186,7 @@ class SeedIterationStateManager:
         position_errors: torch.Tensor
         orientation_errors: torch.Tensor
 
-    @profiler.record_function("iteration_state_manager/select_values")
+    @record_function_if_profiling("iteration_state_manager/select_values")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def _select_state_values(
         self,
@@ -217,7 +217,7 @@ class SeedIterationStateManager:
             ),
         )
 
-    @profiler.record_function("iteration_state_manager/check_convergence")
+    @record_function_if_profiling("iteration_state_manager/check_convergence")
     @get_torch_jit_decorator(only_valid_for_compile=True)
     def _check_convergence(
         self,

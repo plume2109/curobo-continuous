@@ -1103,7 +1103,7 @@ def main():
     if args.clear_aabb is not None:
         clear_min = torch.tensor(args.clear_aabb[:3], device=args.device, dtype=torch.float32)
         clear_max = torch.tensor(args.clear_aabb[3:], device=args.device, dtype=torch.float32)
-        n_cleared = mapper.clear_region(clear_min, clear_max)
+        n_cleared = mapper.clear_regions(clear_min, clear_max)
         print(
             "Cleared "
             f"{n_cleared} allocated blocks intersecting AABB "

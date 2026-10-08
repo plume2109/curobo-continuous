@@ -13,7 +13,6 @@ from enum import Enum
 from typing import Optional
 
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.optim.particle.sample_strategies.particle_sampler import MixedParticleSampler
 from curobo._src.optim.particle.sample_strategies.particle_sampler_cfg import ParticleSamplerCfg
@@ -21,6 +20,7 @@ from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.util.logging import log_and_raise
 from curobo._src.util.tensor_util import copy_tensor
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class CovType(Enum):
@@ -208,7 +208,7 @@ class GaussianDistribution:
         sample_per_problem: bool,
     ):
         """Regenerate pre-generated samples (e.g., after seed reset)."""
-        with profiler.record_function("gaussian_dist/update_samples"):
+        with record_function_if_profiling("gaussian_dist/update_samples"):
             iters = 1 if fixed_samples else num_iters
             if sample_per_problem:
                 s_set = self.sample_lib.get_samples(

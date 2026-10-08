@@ -266,13 +266,30 @@ class Mapper:
             )
         return camera_observation, lidar_observation
 
+    @deprecated("Use Mapper.clear_regions(bounds_min, bounds_max); it takes one box or N boxes.")
     def clear_region(self, bounds_min, bounds_max) -> int:
         """Clear dynamic map contents inside a conservative world-space AABB.
 
         Blocks remain allocated. The cached ESDF voxel grid is invalidated and
         must be recomputed with :meth:`compute_esdf`.
         """
-        n_clear = self._integrator.clear_region(bounds_min, bounds_max)
+        return self.clear_regions(bounds_min, bounds_max)
+
+    def clear_regions(self, bounds_min: torch.Tensor, bounds_max: torch.Tensor) -> int:
+        """Clear dynamic map contents inside N conservative world-space AABBs at once.
+
+        Every allocated block intersecting any box is cleared, with two host syncs whatever
+        N is. Blocks remain allocated; the cached ESDF voxel grid is invalidated and must be
+        recomputed with :meth:`compute_esdf`.
+
+        Args:
+            bounds_min: World-space lower corners, shape ``(N, 3)``, or ``(3,)`` for one box.
+            bounds_max: World-space upper corners, same shape as ``bounds_min``.
+
+        Returns:
+            Number of distinct allocated blocks cleared.
+        """
+        n_clear = self._integrator.clear_regions(bounds_min, bounds_max)
         if n_clear > 0:
             self._last_voxel_grid = None
         return n_clear

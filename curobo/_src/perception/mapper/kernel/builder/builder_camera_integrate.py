@@ -310,31 +310,41 @@ def make_camera_integrate_kernels(
         else:
             wp.atomic_add(support_overflow_count, 0, wp.int32(1))
 
-    @warp_kernel(f"collect_blocks_in_aabb_kernel_{suffix}")
-    def collect_blocks_in_aabb_kernel(
+    @warp_kernel(f"collect_blocks_in_aabbs_kernel_{suffix}")
+    def collect_blocks_in_aabbs_kernel(
         hash_table: wp.array(dtype=wp.int64),
         hash_capacity: wp.int32,
-        min_bx: wp.int32,
-        min_by: wp.int32,
-        min_bz: wp.int32,
-        count_x: wp.int32,
-        count_y: wp.int32,
-        count_z: wp.int32,
+        box_min_block: wp.array(dtype=wp.vec3i),
+        box_block_count: wp.array(dtype=wp.vec3i),
+        launch_count_x: wp.int32,
+        launch_count_y: wp.int32,
+        clear_mark: wp.array(dtype=wp.int32),
+        clear_generation: wp.int32,
         clear_pool_indices: wp.array(dtype=wp.int32),
         clear_count: wp.array(dtype=wp.int32),
         max_blocks: wp.int32,
     ):
-        """Collect allocated blocks whose volume intersects a world AABB.
+        """Collect, without duplicates, allocated blocks intersecting any of N AABBs.
 
-        Launch with ``dim = (count_x, count_y, count_z)``.
+        Box ``i`` covers block keys ``box_min_block[i] + [0, box_block_count[i])``. A block
+        hit by several boxes is appended once, using ``clear_mark[pool_idx] ==
+        clear_generation`` as the seen flag.
+
+        Launch with ``dim = (N, launch_count_x * launch_count_y * launch_count_z)`` where
+        ``launch_count_*`` bound every ``box_block_count[i]``.
         """
-        local_x, local_y, local_z = wp.tid()
-        if local_x >= count_x or local_y >= count_y or local_z >= count_z:
+        box_idx, local_flat = wp.tid()
+        count = box_block_count[box_idx]
+        local_x = local_flat % launch_count_x
+        local_y = (local_flat // launch_count_x) % launch_count_y
+        local_z = local_flat // (launch_count_x * launch_count_y)
+        if local_x >= count[0] or local_y >= count[1] or local_z >= count[2]:
             return
 
-        bx = min_bx + local_x
-        by = min_by + local_y
-        bz = min_bz + local_z
+        start = box_min_block[box_idx]
+        bx = start[0] + local_x
+        by = start[1] + local_y
+        bz = start[2] + local_z
 
         grid = block_key_to_grid_coords(bx, by, bz)
         max_bx = (GRID_W + BLOCK_SIZE - wp.int32(1)) // BLOCK_SIZE
@@ -351,7 +361,10 @@ def make_camera_integrate_kernels(
             return
 
         pool_idx = hash_lookup(hash_table, bx, by, bz, hash_capacity)
-        if pool_idx < wp.int32(0):
+        if pool_idx < wp.int32(0) or pool_idx >= max_blocks:
+            return
+
+        if wp.atomic_exch(clear_mark, pool_idx, clear_generation) == clear_generation:
             return
 
         out_idx = wp.atomic_add(clear_count, 0, wp.int32(1))
@@ -1204,7 +1217,7 @@ def make_camera_integrate_kernels(
         "compute_block_keys_only_kernel": compute_block_keys_only_kernel,
         "allocate_visible_blocks_from_keys_kernel": allocate_visible_blocks_from_keys_kernel,
         "build_support_pixels_from_keys_kernel": build_support_pixels_from_keys_kernel,
-        "collect_blocks_in_aabb_kernel": collect_blocks_in_aabb_kernel,
+        "collect_blocks_in_aabbs_kernel": collect_blocks_in_aabbs_kernel,
         "clear_new_block_grid_rgb_kernel": clear_new_block_grid_rgb_kernel,
         "clear_blocks_by_pool_kernel": clear_blocks_by_pool_kernel,
         "clear_block_grid_rgb_by_pool_kernel": clear_block_grid_rgb_by_pool_kernel,

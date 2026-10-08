@@ -17,7 +17,6 @@ from typing import Dict, List, Optional, TypeVar, Union
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 import curobo._src.runtime as curobo_runtime
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
@@ -40,6 +39,7 @@ from curobo._src.state.state_joint import JointState
 from curobo._src.types.tool_pose import GoalToolPose
 from curobo._src.util.logging import log_and_raise, log_warn
 from curobo._src.util.torch_util import is_cuda_graph_reset_available
+from curobo._src.util.torch_util import record_function_if_profiling
 
 T_BDOF = TypeVar("T_BDOF", bound=torch.Tensor)
 
@@ -101,7 +101,7 @@ class SolverCore:
             joint_names=self.joint_names,
         )
 
-    @profiler.record_function("solver_core/initialize_components")
+    @record_function_if_profiling("solver_core/initialize_components")
     def _initialize_components(self):
         """Build collision checker, rollouts, and optimizers from config."""
         # 1. Collision checker
@@ -205,7 +205,7 @@ class SolverCore:
     # Rollout management
     # -----------------------------------------------------------------------
 
-    @profiler.record_function("solver_core/get_all_rollout_instances")
+    @record_function_if_profiling("solver_core/get_all_rollout_instances")
     def get_all_rollout_instances(
         self,
         include_optimizer_rollouts: bool = True,
@@ -219,7 +219,7 @@ class SolverCore:
             rollouts += self.optimizer_rollouts
         return rollouts
 
-    @profiler.record_function("solver_core/update_rollout_params")
+    @record_function_if_profiling("solver_core/update_rollout_params")
     def update_rollout_params(
         self, goal_buffer: GoalRegistry, include_auxiliary_rollout: bool = True
     ):
@@ -231,7 +231,7 @@ class SolverCore:
             rollout.update_params(goal_buffer)
         self.optimizer.update_rollout_params(goal_buffer)
 
-    @profiler.record_function("solver_core/reset_shape")
+    @record_function_if_profiling("solver_core/reset_shape")
     def reset_shape(self):
         """Resets the shape of internal components, often needed when batch size changes."""
         self.metrics_rollout.reset_shape()
@@ -242,7 +242,7 @@ class SolverCore:
             rollout.reset_shape()
         self.reset_cuda_graph()
 
-    @profiler.record_function("solver_core/reset_seed")
+    @record_function_if_profiling("solver_core/reset_seed")
     def reset_seed(self):
         """Resets the seed of the action sample generator."""
         self.seed_manager.reset_seed()
@@ -250,7 +250,7 @@ class SolverCore:
             rollout.reset_seed()
         self.optimizer.reset_seed()
 
-    @profiler.record_function("solver_core/reset_cuda_graph")
+    @record_function_if_profiling("solver_core/reset_cuda_graph")
     def reset_cuda_graph(self):
         """Resets CUDA graphs if they are in use."""
         if not self.config.use_cuda_graph:
@@ -281,7 +281,7 @@ class SolverCore:
     # Goal buffer
     # -----------------------------------------------------------------------
 
-    @profiler.record_function("solver_core/prepare_goal_buffer")
+    @record_function_if_profiling("solver_core/prepare_goal_buffer")
     def prepare_goal_buffer(
         self,
         solve_state: SolveState,
@@ -334,7 +334,7 @@ class SolverCore:
     # Seed preparation
     # -----------------------------------------------------------------------
 
-    @profiler.record_function("solver_core/prepare_action_seeds")
+    @record_function_if_profiling("solver_core/prepare_action_seeds")
     def prepare_action_seeds(
         self,
         batch_size: int,
@@ -348,7 +348,7 @@ class SolverCore:
             batch_size, num_seeds, seed_config, current_state, seed_traj
         )
 
-    @profiler.record_function("solver_core/prepare_trajectory_seeds")
+    @record_function_if_profiling("solver_core/prepare_trajectory_seeds")
     def prepare_trajectory_seeds(
         self,
         batch_size: int,
@@ -366,7 +366,7 @@ class SolverCore:
     # Cost toggling (weight factors passed as args, not read from config)
     # -----------------------------------------------------------------------
 
-    @profiler.record_function("solver_core/enable_tool_pose_tracking")
+    @record_function_if_profiling("solver_core/enable_tool_pose_tracking")
     def enable_tool_pose_tracking(
         self,
         tool_frames: Optional[List[str]] = None,
@@ -388,7 +388,7 @@ class SolverCore:
         }
         self.update_tool_pose_criteria(tool_pose_criteria)
 
-    @profiler.record_function("solver_core/disable_tool_pose_tracking")
+    @record_function_if_profiling("solver_core/disable_tool_pose_tracking")
     def disable_tool_pose_tracking(self, tool_frames: Optional[List[str]] = None) -> None:
         """Disable goal pose tracking for the given links.
 
@@ -400,7 +400,7 @@ class SolverCore:
         tool_pose_criteria = {k: ToolPoseCriteria.disabled() for k in tool_frames}
         self.update_tool_pose_criteria(tool_pose_criteria)
 
-    @profiler.record_function("solver_core/enable_joint_position_tracking")
+    @record_function_if_profiling("solver_core/enable_joint_position_tracking")
     def enable_joint_position_tracking(self) -> None:
         """Enable joint position tracking."""
         for rollout in self.get_all_rollout_instances(include_optimizer_rollouts=True):
@@ -413,7 +413,7 @@ class SolverCore:
                 if target_cspace_cost is not None:
                     target_cspace_cost.disable_cost()
 
-    @profiler.record_function("solver_core/disable_joint_position_tracking")
+    @record_function_if_profiling("solver_core/disable_joint_position_tracking")
     def disable_joint_position_tracking(self) -> None:
         """Disable joint position tracking."""
         for rollout in self.get_all_rollout_instances(include_optimizer_rollouts=True):
@@ -488,7 +488,7 @@ class SolverCore:
     # Sample configs (collision activation distance passed as arg)
     # -----------------------------------------------------------------------
 
-    @profiler.record_function("solver_core/sample_configs")
+    @record_function_if_profiling("solver_core/sample_configs")
     def sample_configs(
         self,
         num_samples: int,
@@ -584,7 +584,7 @@ class SolverCore:
         for rollout in self.get_all_rollout_instances():
             rollout.transition_model.update_links_inertial(link_properties)
 
-    @profiler.record_function("solver_core/debug_dump")
+    @record_function_if_profiling("solver_core/debug_dump")
     def debug_dump(self, file_path: str):
         if not curobo_runtime.debug_cuda_graphs:
             log_warn("CUDA Graph Debug Mode is not enabled, cannot dump CUDA Graph")

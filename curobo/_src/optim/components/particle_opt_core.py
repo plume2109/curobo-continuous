@@ -16,7 +16,6 @@ import math
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.optim.components.action_bounds import ActionBounds
 from curobo._src.optim.components.debug_recorder import DebugRecorder
@@ -57,6 +56,7 @@ from curobo._src.util.cuda_event_timer import CudaEventTimer
 from curobo._src.util.cuda_graph_util import GraphExecutor, create_graph_executor
 from curobo._src.util.logging import log_and_raise
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class ParticleOptCore:
@@ -345,7 +345,7 @@ class ParticleOptCore:
         for _ in range(self.config.inner_iters):
             trajectory = self._generate_rollouts()
 
-            with profiler.record_function("particle_opt/update_distribution"):
+            with record_function_if_profiling("particle_opt/update_distribution"):
                 self._update_distribution_fn(trajectory)
 
             if self._debug:

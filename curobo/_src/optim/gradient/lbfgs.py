@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.curobolib.cuda_ops.optimization import LBFGScu
 from curobo._src.optim.components.gradient_opt_core import GradientOptCore
@@ -31,6 +30,7 @@ from curobo._src.optim.optimization_iteration_state import OptimizationIteration
 from curobo._src.rollout.rollout_protocol import Rollout
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.util.logging import log_and_raise, log_info
+from curobo._src.util.torch_util import record_function_if_profiling
 
 __all__ = ["LBFGSOptCfg", "LBFGSOpt"]
 
@@ -161,7 +161,7 @@ class LBFGSOpt:
     search, CUDA graph wrapping, and an optional CUDA kernel fast path.
     """
 
-    @profiler.record_function("lbfgs_opt/init")
+    @record_function_if_profiling("lbfgs_opt/init")
     def __init__(
         self,
         config: LBFGSOptCfg,
@@ -220,7 +220,7 @@ class LBFGSOpt:
         grad_q = iteration_state.exploration_gradient.view(-1, 1, self._core.opt_dim)
 
         if self._core.config.use_cuda_kernel_step_direction:
-            with profiler.record_function("lbfgs/fused"):
+            with record_function_if_profiling("lbfgs/fused"):
                 dq = LBFGScu.apply(
                     self._qn.step_q_buffer,
                     self._qn.rho,

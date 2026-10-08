@@ -16,7 +16,6 @@ from collections import Counter
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.curobolib.cuda_ops.kinematics import KinematicsFusedFunction
 from curobo._src.geom.types import tensor_sphere
@@ -37,6 +36,7 @@ from curobo._src.state.state_joint_ops import append_joints_to_state
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.types.pose import Pose
 from curobo._src.util.logging import log_and_raise
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class KinematicsLoader(KinematicsLoaderCfg):
@@ -80,7 +80,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
         """Kinematics parser used to generate robot parameters."""
         return self._kinematics_parser
 
-    @profiler.record_function("robot_generator/initialize_tensors")
+    @record_function_if_profiling("robot_generator/initialize_tensors")
     def initialize_tensors(self):
         """Initialize tensors for kinematics representatiobn."""
         self._joint_limits = None
@@ -211,7 +211,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
         )
         self.add_link(link_params)
 
-    @profiler.record_function("robot_generator/build_chain")
+    @record_function_if_profiling("robot_generator/build_chain")
     def _build_chain(
         self,
         base_link: str,
@@ -363,7 +363,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
 
         return joint_links_data_tensor, joint_links_offsets_tensor, joint_affects_endeffector_tensor
 
-    @profiler.record_function("robot_generator/build_kinematics_tensors")
+    @record_function_if_profiling("robot_generator/build_kinematics_tensors")
     def _build_kinematics_tensors(self, base_link, tool_frames, chain_link_names):
         """Create kinematic tensors for robot given kinematic tree.
 
@@ -484,7 +484,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
         )
         self._all_joint_names = all_joint_names
 
-    @profiler.record_function("robot_generator/build_kinematics")
+    @record_function_if_profiling("robot_generator/build_kinematics")
     def _build_kinematics(
         self, base_link: str, other_links: List[str], tool_frames: List[str]
     ):
@@ -674,7 +674,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
 
         return cspace_lock_joints
 
-    @profiler.record_function("robot_generator/build_kinematics_with_lock_joints")
+    @record_function_if_profiling("robot_generator/build_kinematics_with_lock_joints")
     def _build_kinematics_with_lock_joints(
         self,
         base_link: str,
@@ -782,7 +782,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
         )
         self.tool_frames = tool_frames
         # compute a fixed transform for fixing joints:
-        with profiler.record_function("cuda_robot_generator/fix_locked_joints"):
+        with record_function_if_profiling("cuda_robot_generator/fix_locked_joints"):
             # convert tensors to cpu:
             self._joint_map_type = self._joint_map_type.to(device=self.cpu_tensor_args.device)
             self._joint_map = self._joint_map.to(device=self.cpu_tensor_args.device)
@@ -844,7 +844,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
             {joint_name: lock_joints[joint_name] for joint_name in lock_joint_names}
         )
 
-    @profiler.record_function("robot_generator/build_collision_model")
+    @record_function_if_profiling("robot_generator/build_collision_model")
     def _build_collision_model(
         self,
         collision_spheres: Dict,
@@ -865,7 +865,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
         cpu_tensor_args = DeviceCfg(device="cpu", dtype=torch.float32)
         self_collision_buffer = self.self_collision_buffer.copy()
 
-        with profiler.record_function("robot_generator/build_collision_spheres"):
+        with record_function_if_profiling("robot_generator/build_collision_spheres"):
             for j_idx, j in enumerate(collision_link_names):
                 num_spheres = len(collision_spheres[j])
                 link_spheres = torch.zeros(
@@ -914,7 +914,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
             device_cfg=self.device_cfg,
         )
 
-    @profiler.record_function("robot_generator/add_body_to_tree")
+    @record_function_if_profiling("robot_generator/add_body_to_tree")
     def _add_body_to_tree(self, link_name: str, base=False):
         """Add link to kinematic tree.
 
@@ -993,7 +993,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
 
         return j_data
 
-    @profiler.record_function("robot_generator/get_link_poses")
+    @record_function_if_profiling("robot_generator/get_link_poses")
     def _get_link_poses(
         self, q: torch.Tensor, query_link_names: List[str], kinematics_config: KinematicsParams
     ) -> Pose:
@@ -1069,7 +1069,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
         """Get joint limits for the robot."""
         return self._joint_limits
 
-    @profiler.record_function("robot_generator/get_joint_limits")
+    @record_function_if_profiling("robot_generator/get_joint_limits")
     def _get_joint_position_velocity_limits(self) -> Dict[str, torch.Tensor]:
         """Compute joint position and velocity limits for the robot.
 
@@ -1098,7 +1098,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
             )
         return joint_limits
 
-    @profiler.record_function("robot_generator/update_joint_limits")
+    @record_function_if_profiling("robot_generator/update_joint_limits")
     def _update_joint_limits(self):
         """Update limits from CSpaceParams (acceleration, jerk limits and position clips)."""
         joint_limits = self._get_joint_position_velocity_limits()

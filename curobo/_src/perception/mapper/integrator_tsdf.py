@@ -916,18 +916,20 @@ class BlockSparseTSDFIntegrator:
         """
         return decay_and_recycle(self._tsdf, 1.0)  # No additional decay
 
-    def clear_region(self, bounds_min, bounds_max) -> int:
-        """Clear dynamic map contents for allocated blocks intersecting an AABB.
+    def clear_regions(self, bounds_min: torch.Tensor, bounds_max: torch.Tensor) -> int:
+        """Clear dynamic map contents for allocated blocks intersecting any of N AABBs.
+
+        Blocks remain allocated; only dynamic TSDF/RGB, block sums, and per-block features
+        are reset. One box is ``(3,)`` or ``(1, 3)``.
 
         Args:
-            bounds_min: World-space lower AABB corner, shape ``(3,)``.
-            bounds_max: World-space upper AABB corner, shape ``(3,)``.
+            bounds_min: World-space lower AABB corners, shape ``(N, 3)``.
+            bounds_max: World-space upper AABB corners, shape ``(N, 3)``.
 
         Returns:
-            Number of allocated blocks cleared. Blocks remain allocated; only
-            dynamic TSDF/RGB, block sums, and per-block features are reset.
+            Number of distinct allocated blocks cleared.
         """
-        return self._camera_integrator.clear_region(self._tsdf, bounds_min, bounds_max)
+        return self._camera_integrator.clear_regions(self._tsdf, bounds_min, bounds_max)
 
     def clear_blocks(self, pool_indices) -> int:
         """Clear dynamic map contents for explicit block-pool indices.

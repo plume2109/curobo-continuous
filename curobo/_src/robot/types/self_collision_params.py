@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.util.logging import log_and_raise, log_debug
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 @dataclass
@@ -58,7 +58,7 @@ class SelfCollisionKinematicsCfg:
         )
         return num_blocks
 
-    @profiler.record_function("SelfCollisionKinematicsCfg.create_from_sphere_pair_distances")
+    @record_function_if_profiling("SelfCollisionKinematicsCfg.create_from_sphere_pair_distances")
     @staticmethod
     def create_from_sphere_pair_distances(
         sphere_pair_distances: torch.Tensor,
@@ -120,7 +120,7 @@ class SelfCollisionKinematicsCfg:
             collision_pairs=collision_pairs,
         )
 
-    @profiler.record_function(
+    @record_function_if_profiling(
         "SelfCollisionKinematicsCfg.compute_sphere_pair_distance_with_link_pair_ignores"
     )
     @staticmethod
@@ -200,13 +200,13 @@ class SelfCollisionKinematicsCfg:
                 self_collision_distance[idx1, idx2] = sp1_sp2_distance
 
         self_collision_distance = self_collision_distance.to(device=device_cfg.device)
-        with profiler.record_function("robot_generator/self_collision_min"):
+        with record_function_if_profiling("robot_generator/self_collision_min"):
             d_mat = self_collision_distance
             self_collision_distance = torch.minimum(d_mat, d_mat.transpose(0, 1))
 
         return self_collision_distance, self_collision_sphere_padding
 
-    @profiler.record_function("SelfCollisionKinematicsCfg.create_from_link_pairs")
+    @record_function_if_profiling("SelfCollisionKinematicsCfg.create_from_link_pairs")
     @staticmethod
     def create_from_link_pairs(
         collision_link_names: List[str],

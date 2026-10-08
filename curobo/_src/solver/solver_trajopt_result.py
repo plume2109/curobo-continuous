@@ -8,7 +8,6 @@ from typing import Optional
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 # CuRobo
 import curobo._src.runtime as curobo_runtime
@@ -23,6 +22,7 @@ from curobo._src.state.state_joint_trajectory_ops import (
 )
 from curobo._src.util.logging import log_and_raise
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 @dataclass
@@ -70,7 +70,7 @@ class TrajOptSolverResult(BaseSolverResult):
         motion_time = (horizon - 1) * dt
         return motion_time
 
-    @profiler.record_function("trajopt_solver_result/clone")
+    @record_function_if_profiling("trajopt_solver_result/clone")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def clone(self) -> TrajOptSolverResult:
         if curobo_runtime.debug:
@@ -129,7 +129,7 @@ class TrajOptSolverResult(BaseSolverResult):
             solution_state=base_clone.solution_state,
         )
 
-    @profiler.record_function("trajopt_solver_result/get_interpolated_plan")
+    @record_function_if_profiling("trajopt_solver_result/get_interpolated_plan")
     def get_interpolated_plan(self) -> JointState:
         if self.interpolated_last_tstep is None:
             return self.interpolated_trajectory
@@ -139,12 +139,12 @@ class TrajOptSolverResult(BaseSolverResult):
             self.interpolated_trajectory, 0, self.interpolated_last_tstep[0]
         )
 
-    @profiler.record_function("trajopt_solver_result/process_metrics_and_rank_seeds")
+    @record_function_if_profiling("trajopt_solver_result/process_metrics_and_rank_seeds")
     def process_metrics_and_rank_seeds(self):
         self._process_metrics()
         self._compute_rank()
 
-    @profiler.record_function("trajopt_solver_result/_process_metrics")
+    @record_function_if_profiling("trajopt_solver_result/_process_metrics")
     def _process_metrics(self):
         # get batch size and num seeds:
         batch_size = self.batch_size
@@ -262,7 +262,7 @@ class TrajOptSolverResult(BaseSolverResult):
         self.goalset_index = goalset_index
         self.seed_cost = cost_sum.view(self.batch_size, self.num_seeds)
 
-    @profiler.record_function("trajopt_solver_result/_compute_rank")
+    @record_function_if_profiling("trajopt_solver_result/_compute_rank")
     def _compute_rank(self):
         if self.metrics is None:
             log_and_raise("metrics is not set")
@@ -329,7 +329,7 @@ class TrajOptSolverResult(BaseSolverResult):
 
         return total_cost_reshaped, seed_rank
 
-    @profiler.record_function("trajopt_solver_result/get_topk_seeds")
+    @record_function_if_profiling("trajopt_solver_result/get_topk_seeds")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def get_topk_seeds(self, topk: int) -> TrajOptSolverResult:
         """Get the topk best seeds per problem from the result.
@@ -429,7 +429,7 @@ class TrajOptSolverResult(BaseSolverResult):
 
         return new_result
 
-    @profiler.record_function("trajopt_solver_result/copy_successful_solutions")
+    @record_function_if_profiling("trajopt_solver_result/copy_successful_solutions")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def copy_successful_solutions(self, other: TrajOptSolverResult):
         """Copy successful solutions from other result to self.

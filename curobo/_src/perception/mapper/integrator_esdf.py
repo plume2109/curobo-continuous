@@ -642,13 +642,14 @@ class BlockSparseESDFIntegrator:
         )
         self._frame_count += 1
 
-    def clear_region(self, bounds_min, bounds_max) -> int:
-        """Clear dynamic TSDF contents for blocks intersecting a world AABB.
+    def clear_regions(self, bounds_min: torch.Tensor, bounds_max: torch.Tensor) -> int:
+        """Clear dynamic TSDF contents for blocks intersecting any of N world AABBs.
 
-        Cached ESDF buffers are invalidated because the TSDF source data has
-        changed. Call :meth:`compute_esdf` again before using the ESDF.
+        ``bounds_*`` have shape ``(N, 3)`` (or ``(3,)`` for one box). Cached ESDF buffers are
+        invalidated when anything was cleared; call :meth:`compute_esdf` again before using
+        the ESDF.
         """
-        n_clear = self._tsdf_integrator.clear_region(bounds_min, bounds_max)
+        n_clear = self._tsdf_integrator.clear_regions(bounds_min, bounds_max)
         if n_clear > 0:
             self._site_index.fill_(-1)
             self._dist_field.zero_()

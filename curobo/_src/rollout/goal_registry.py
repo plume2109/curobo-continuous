@@ -8,7 +8,6 @@ from typing import Dict, Optional
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.state.state_joint import JointState
 from curobo._src.types.device_cfg import DeviceCfg
@@ -21,6 +20,7 @@ from curobo._src.util.tensor_util import (
     copy_or_clone,
     tensor_repeat_seeds,
 )
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 @dataclass
@@ -115,7 +115,7 @@ class GoalRegistry:
             return None
         return self.link_goal_poses.to_dict()
 
-    @profiler.record_function("GoalRegistry/repeat_seeds")
+    @record_function_if_profiling("GoalRegistry/repeat_seeds")
     def repeat_seeds(self, num_seeds: int, repeat_seed_idx_buffers: bool = False):
         """Repeat seeds across batch and seeds.
 
@@ -281,7 +281,7 @@ class GoalRegistry:
             idxs_goal_js=batch_goal_state_idx,
         )
 
-    @profiler.record_function("GoalRegistry/copy_")
+    @record_function_if_profiling("GoalRegistry/copy_")
     def copy_(self, goal: GoalRegistry, update_idx_buffers: bool = True, allow_clone: bool = True):
         """Copy data from another goal object.
 

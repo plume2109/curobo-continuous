@@ -11,7 +11,7 @@ dynamic = ["version"]
 description = "GPU robot motion toolkit containing cuda accelerated kinematics, IK, MPC, Global motion planning, and optimization solvers."
 readme = "README.md"
 license = {text = "Apache-2.0"}
-authors = [{name = "NVIDIA"}]
+authors = [{name = "NVIDIA"}, {name = "Ludovic Maitre"}]
 requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
@@ -24,17 +24,19 @@ classifiers = [
 
 dependencies = [
     "importlib_resources",
+    "lxml",
     "matplotlib",
     "networkx",
     "numpy",
     "numpy-quaternion",
+    "packaging",
     "pyyaml",
     "scipy>=1.7.0",
     "setuptools_scm>=6.2",
     "tqdm",
     "trimesh",
     "viser",
-    "warp-lang>=0.10.0",
+    "warp-lang>=1.16",  # tested version; older ones untested on CUDA 13 / Jetson Thor
     "wheel",
     "yourdfpy>=0.0.53",
 ]

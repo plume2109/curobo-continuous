@@ -234,7 +234,7 @@ class TestKernelBuilderConstruction:
             "world_to_block_coords",
             "compute_block_keys_only_kernel",
             "integrate_voxels_kernel",
-            "collect_blocks_in_aabb_kernel",
+            "collect_blocks_in_aabbs_kernel",
             "extract_occupied_voxels_kernel",
             "seed_esdf_sites_gather_kernel",
             "mark_blocks_in_frustum_kernel",
