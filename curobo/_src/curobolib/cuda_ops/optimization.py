@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Standard Library
+from typing import Optional
+
 # Third Party
 import torch
 from torch.autograd import Function
@@ -183,6 +186,143 @@ def wolfe_line_search(
         num_problems,
     )
     return iteration_state, exploration_idx, selected_idx
+
+
+def wolfe_line_search_lbfgs_step(
+    iteration_state: OptimizationIterationState,
+    line_search_context: LineSearchContext,
+    exploration_idx: torch.Tensor,
+    selected_idx: torch.Tensor,
+    search_cost: torch.Tensor,
+    search_action: torch.Tensor,
+    search_gradient: torch.Tensor,
+    strong_wolfe: bool,
+    approx_wolfe: bool,
+    step_vec: torch.Tensor,
+    rho_buffer: torch.Tensor,
+    y_buffer: torch.Tensor,
+    s_buffer: torch.Tensor,
+    gram_buffer: torch.Tensor,
+    x_0: torch.Tensor,
+    grad_0: torch.Tensor,
+    epsilon: float,
+    stable_mode: bool,
+    action_step_max: Optional[torch.Tensor] = None,
+) -> OptimizationIterationState:
+    """Wolfe line search, compact L-BFGS step and next search points in one kernel.
+
+    Does what :func:`wolfe_line_search`, :class:`LBFGScu` (shared buffers) and
+    ``search_action = exploration_action + line_search_scale * step`` do in sequence:
+
+    - updates ``iteration_state`` in place as :func:`wolfe_line_search` does, searching
+      along ``iteration_state.step_direction``;
+    - computes the L-BFGS step at the new exploration point into ``step_vec`` and updates
+      the history buffers, as :class:`LBFGScu` does;
+    - overwrites ``search_action`` with the points the next line search evaluates.
+
+    Args:
+        iteration_state: State of the current iteration, updated in place.
+        line_search_context: Line search parameters.
+        exploration_idx: Exploration index output. Shape: (num_problems, n_linesearch), int32.
+        selected_idx: Selected index output. Shape: (num_problems, n_linesearch), int32.
+        search_cost: Cost of each search point. Shape: (num_problems, n_linesearch, 1).
+        search_action: Search points, overwritten with the next ones.
+            Shape: (num_problems, n_linesearch, opt_dim).
+        search_gradient: Gradient at each search point.
+            Shape: (num_problems, n_linesearch, opt_dim).
+        strong_wolfe: Use the strong Wolfe curvature condition.
+        approx_wolfe: Fall back as approximate Wolfe does when no point satisfies Wolfe.
+        step_vec: New step direction output. Shape: (num_problems, opt_dim).
+        rho_buffer: L-BFGS rho history. Shape: (m, num_problems, 1, 1).
+        y_buffer: L-BFGS gradient differences. Shape: (m, num_problems, opt_dim, 1).
+        s_buffer: L-BFGS position differences. Shape: (m, num_problems, opt_dim, 1).
+        gram_buffer: S^T Y and Y^T Y of the history. Shape: (num_problems, 2, m, m).
+        x_0: Previous L-BFGS point. Shape: (num_problems, opt_dim, 1).
+        grad_0: Gradient at ``x_0``. Shape: (num_problems, opt_dim, 1).
+        epsilon: Hessian scaling used when s^T y / y^T y is not finite.
+        stable_mode: Guard against non-positive curvature pairs.
+        action_step_max: If given, the step is scaled so no element exceeds its per-action
+            limit, as in :meth:`LineSearchStrategy.scale_action`. Shape: (action_dim,).
+
+    Returns:
+        ``iteration_state``, updated in place except for ``step_direction``.
+    """
+    num_problems = line_search_context.num_problems
+    opt_dim = line_search_context.opt_dim
+    n_linesearch = line_search_context.n_linesearch
+    m = y_buffer.shape[0]
+    device = search_action.device
+    scale_step = action_step_max is not None
+    if scale_step:
+        check_float32_tensors(device, action_step_max=action_step_max)
+    else:
+        action_step_max = step_vec
+    check_float32_tensors(
+        device,
+        search_cost=search_cost,
+        search_action=search_action,
+        search_gradient=search_gradient,
+        step_direction=iteration_state.step_direction,
+        step_vec=step_vec,
+        gram_buffer=gram_buffer,
+    )
+    if search_action.shape != (num_problems, n_linesearch, opt_dim):
+        log_and_raise(
+            f"search_action must have shape ({num_problems}, {n_linesearch}, {opt_dim}). "
+            f"Got {search_action.shape}"
+        )
+    if search_gradient.shape != search_action.shape:
+        log_and_raise(
+            f"search_gradient must have shape {search_action.shape}. Got {search_gradient.shape}"
+        )
+    if gram_buffer.shape != (num_problems, 2, m, m):
+        log_and_raise(
+            f"gram_buffer must have shape ({num_problems}, 2, {m}, {m}). Got {gram_buffer.shape}"
+        )
+
+    optimization_cu.launch_line_search_lbfgs_step(
+        iteration_state.best_cost,
+        iteration_state.best_action,
+        iteration_state.best_iteration,
+        iteration_state.current_iteration,
+        iteration_state.converged,
+        line_search_context.convergence_iteration,
+        line_search_context.cost_delta_threshold,
+        line_search_context.cost_relative_threshold,
+        iteration_state.exploration_cost,
+        iteration_state.exploration_action,
+        iteration_state.exploration_gradient,
+        exploration_idx.view(-1),
+        iteration_state.cost,
+        iteration_state.action,
+        iteration_state.gradient,
+        selected_idx.view(-1),
+        search_cost,
+        search_action,
+        search_gradient,
+        iteration_state.step_direction,
+        line_search_context.line_search_scale,
+        line_search_context.line_search_c_1,
+        line_search_context.line_search_c_2,
+        strong_wolfe,
+        approx_wolfe,
+        n_linesearch,
+        step_vec,
+        rho_buffer,
+        y_buffer,
+        s_buffer,
+        gram_buffer,
+        x_0,
+        grad_0,
+        epsilon,
+        num_problems,
+        m,
+        opt_dim,
+        stable_mode,
+        action_step_max,
+        scale_step,
+    )
+    return iteration_state
 
 
 class LBFGScu(Function):

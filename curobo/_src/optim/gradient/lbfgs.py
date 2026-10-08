@@ -11,6 +11,7 @@ CUDA graph acceleration, and optional cuRobo CUDA kernels for the two-loop step.
 from __future__ import annotations
 
 # Standard Library
+import dataclasses
 import math
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.autograd.profiler as profiler
 
-from curobo._src.curobolib.cuda_ops.optimization import LBFGScu
+from curobo._src.curobolib.cuda_ops.optimization import LBFGScu, wolfe_line_search_lbfgs_step
 from curobo._src.optim.components.gradient_opt_core import GradientOptCore
 from curobo._src.optim.components.quasi_newton_buffers import QuasiNewtonBuffers
 from curobo._src.optim.gradient.lbfgs_jit_helpers import (
@@ -33,6 +34,18 @@ from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.util.logging import log_and_raise, log_info
 
 __all__ = ["LBFGSOptCfg", "LBFGSOpt"]
+
+#: Line-search points the fused line search and L-BFGS kernel supports
+#: (MAX_FUSED_LINE_SEARCH in lbfgs_line_search_step_kernel.cuh).
+_FUSED_STEP_MAX_LINE_SEARCH = 8
+#: Static shared memory of the fused kernel, in bytes, on top of the compact kernel's.
+_FUSED_STEP_STATIC_SHARED_MEMORY = _FUSED_STEP_MAX_LINE_SEARCH * 32 * 4 + 16
+#: Line searches the CUDA line search kernel implements.
+_FUSED_STEP_LINE_SEARCH_TYPES = (
+    LineSearchType.WOLFE,
+    LineSearchType.STRONG_WOLFE,
+    LineSearchType.APPROX_WOLFE,
+)
 
 
 @dataclass
@@ -96,6 +109,12 @@ class LBFGSOptCfg:
     #: small-to-medium opt_dim. Automatically disabled when the shared
     #: memory requirement exceeds the hardware limit.
     use_cuda_kernel_shared_buffers: bool = True
+    #: When True, one CUDA kernel runs the Wolfe line search, the L-BFGS step and the
+    #: next line-search points of each iteration, instead of three kernels. Used only
+    #: when the shared-memory step kernel and the CUDA line search kernel both apply, the
+    #: line search is Wolfe, strong Wolfe or approximate Wolfe, and there are at most 8
+    #: line-search points.
+    use_cuda_kernel_fused_step: bool = True
     initial_step_scale: float = 0.1
 
     def __post_init__(self):
@@ -205,6 +224,22 @@ class LBFGSOpt:
             config.step_scale != 0.0 and config.step_scale != 1.0
         )
 
+        n_linesearch = len(config.line_search_scale)
+        self._use_fused_step = (
+            config.use_cuda_kernel_fused_step
+            and config.use_cuda_kernel_step_direction
+            and config.use_cuda_kernel_shared_buffers
+            and config.use_cuda_kernel_line_search
+            and 0 < config.history <= 31
+            and shared_memory_needed + _FUSED_STEP_STATIC_SHARED_MEMORY <= max_shared_memory
+            and n_linesearch <= min(_FUSED_STEP_MAX_LINE_SEARCH, opt_dim)
+            and LineSearchType(config.line_search_type) in _FUSED_STEP_LINE_SEARCH_TYPES
+        )
+        # Next iteration's search points, written by the fused kernel.
+        self._search_action: Optional[torch.Tensor] = None
+        self._exploration_idx: Optional[torch.Tensor] = None
+        self._selected_idx: Optional[torch.Tensor] = None
+
         self._core = GradientOptCore(
             config,
             rollout_list,
@@ -215,6 +250,7 @@ class LBFGSOpt:
             on_shift=self._on_shift,
             use_cuda_graph=use_cuda_graph,
             step_direction_prescaled=self._scale_step_in_kernel,
+            fused_step_fn=self._fused_step_impl if self._use_fused_step else None,
         )
         self._core.update_num_problems(config.num_problems)
         self._core.finish_init()
@@ -260,6 +296,72 @@ class LBFGSOpt:
 
         return dq.view(-1, self._core.action_horizon, self._core.action_dim)
 
+    def _fused_step_impl(
+        self, iteration_state: OptimizationIterationState, rebuild_search_points: bool
+    ) -> OptimizationIterationState:
+        """Run one iteration with the fused line search and L-BFGS step kernel.
+
+        Evaluates the search points in ``self._search_action``, then one kernel runs the
+        line search, the L-BFGS step and writes the next search points back into
+        ``self._search_action``.
+
+        Args:
+            iteration_state: Current state. Its tensors are updated in place.
+            rebuild_search_points: Build the search points from
+                ``iteration_state.exploration_action`` and ``step_direction`` first.
+
+        Returns:
+            Next state, sharing ``iteration_state``'s tensors except ``step_direction``,
+            which is the new step. Shape: (num_problems, action_horizon, action_dim).
+        """
+        core = self._core
+        context = core._line_search_context
+        num_problems = core.config.num_problems
+        n_linesearch = context.n_linesearch
+
+        if rebuild_search_points:
+            with profiler.record_function("lbfgs/search_points"):
+                torch.addcmul(
+                    iteration_state.exploration_action.detach().unsqueeze(1),
+                    context.line_search_scale,
+                    iteration_state.step_direction.detach().unsqueeze(1),
+                    out=self._search_action.view(
+                        num_problems, n_linesearch, core.action_horizon, core.action_dim
+                    ),
+                )
+
+        search_cost, search_gradient = context.compute_costs_and_gradients(self._search_action)
+
+        with profiler.record_function("lbfgs/line_search_step"):
+            line_search_type = LineSearchType(core.config.line_search_type)
+            wolfe_line_search_lbfgs_step(
+                iteration_state,
+                context,
+                self._exploration_idx,
+                self._selected_idx,
+                search_cost.detach(),
+                self._search_action,
+                search_gradient.detach(),
+                line_search_type == LineSearchType.STRONG_WOLFE,
+                line_search_type == LineSearchType.APPROX_WOLFE,
+                self._qn.step_q_buffer,
+                self._qn.rho,
+                self._qn.y,
+                self._qn.s,
+                self._qn.gram,
+                self._qn.x_0,
+                self._qn.grad_0,
+                core.config.epsilon,
+                core.config.stable_mode,
+                core.action_step_max if self._scale_step_in_kernel else None,
+            )
+        return dataclasses.replace(
+            iteration_state,
+            step_direction=self._qn.step_q_buffer.view(
+                num_problems, core.action_horizon, core.action_dim
+            ),
+        )
+
     def _update_buffers(self, q: torch.Tensor, grad_q: torch.Tensor):
         """Update quasi-Newton history buffers."""
         self._qn.update(q, grad_q)
@@ -278,6 +380,18 @@ class LBFGSOpt:
 
     def _on_resize(self, num_problems):
         self._qn.resize(num_problems, self._core.opt_dim)
+        if self._use_fused_step:
+            config = self._core.config
+            n_linesearch = len(config.line_search_scale)
+            self._search_action = torch.zeros(
+                (num_problems, n_linesearch, self._core.opt_dim),
+                device=config.device_cfg.device,
+                dtype=config.device_cfg.dtype,
+            )
+            self._exploration_idx = torch.zeros(
+                (num_problems, n_linesearch), device=config.device_cfg.device, dtype=torch.int32
+            )
+            self._selected_idx = torch.zeros_like(self._exploration_idx)
 
     def _on_shift(self, shift_steps):
         self._qn.shift(shift_steps, self._core.action_dim)

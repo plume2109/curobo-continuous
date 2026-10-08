@@ -44,6 +44,8 @@ class GradientOptCore:
       - on_initial_state(iteration_state, mask): set reference points
       - on_resize(num_problems): resize optimizer-specific buffers
       - on_shift(shift_steps): shift optimizer-specific buffers
+      - fused_step_fn(iteration_state, rebuild_search_points): optional, replaces the line
+        search and step_direction_fn with one call
     """
 
     _graphable_methods: set = {"_opt_iters", "_prepare_initial_iteration_state"}
@@ -60,6 +62,7 @@ class GradientOptCore:
         on_shift: Optional[Callable] = None,
         use_cuda_graph: bool = False,
         step_direction_prescaled: bool = False,
+        fused_step_fn: Optional[Callable] = None,
     ):
         """Initialize gradient optimizer core with rollouts, callbacks, and config.
 
@@ -92,6 +95,13 @@ class GradientOptCore:
             step_direction_prescaled: If True, ``step_direction_fn`` returns
                 steps already scaled by :attr:`action_step_max`, so the line
                 search skips its own step scaling.
+            fused_step_fn: Optional
+                ``fn(iteration_state, rebuild_search_points) -> OptimizationIterationState``
+                that runs a whole iteration (line search and next step direction) and
+                leaves the next iteration's search points in its own buffer.
+                ``rebuild_search_points`` is True on the first iteration of each
+                :meth:`_opt_iters` call, where that buffer must be built from
+                ``iteration_state``.
         """
         if len(rollout_list) != config.num_rollout_instances:
             log_and_raise(
@@ -114,6 +124,7 @@ class GradientOptCore:
         self._on_initial_state = on_initial_state
         self._on_resize = on_resize
         self._on_shift = on_shift
+        self._fused_step_fn = fused_step_fn
 
         # Rollout instances: [0] = main, [1] = initial evaluation
         self.rollout_fn = rollout_list[0]
@@ -358,13 +369,17 @@ class GradientOptCore:
         for iteration in range(self.config.inner_iters):
             if curobo_runtime.debug_nan:
                 print("iteration: ", iteration)
-            iteration_state = self._opt_step(iteration_state)
+            iteration_state = self._opt_step(
+                iteration_state, rebuild_search_points=iteration == 0
+            )
             self._record_iteration_state(iteration_state)
         return iteration_state
 
     @profiler.record_function("gradient_opt_core/opt_step")
     def _opt_step(
-        self, iteration_state: OptimizationIterationState
+        self,
+        iteration_state: OptimizationIterationState,
+        rebuild_search_points: bool = True,
     ) -> OptimizationIterationState:
         """Execute a single line-search step followed by a step-direction update.
 
@@ -375,6 +390,8 @@ class GradientOptCore:
         Args:
             iteration_state: Current state with action, cost, gradient, and
                 step direction tensors.
+            rebuild_search_points: Passed to ``fused_step_fn``: whether its search
+                points must be rebuilt from ``iteration_state``.
 
         Returns:
             Updated :class:`OptimizationIterationState` with the new action,
@@ -385,6 +402,15 @@ class GradientOptCore:
                 log_and_raise("iteration_state.action is nan")
             if torch.isnan(iteration_state.step_direction).any():
                 log_and_raise("iteration_state.step_direction is nan")
+
+        if self._fused_step_fn is not None:
+            next_state = self._fused_step_fn(iteration_state, rebuild_search_points)
+            if curobo_runtime.debug_nan:
+                if torch.isnan(next_state.exploration_action).any():
+                    log_and_raise("next_state.exploration_action is nan")
+                if torch.isnan(next_state.step_direction).any():
+                    log_and_raise("step_direction is nan")
+            return next_state
 
         next_state = self._line_search_strategy.search(
             iteration_state, context=self._line_search_context

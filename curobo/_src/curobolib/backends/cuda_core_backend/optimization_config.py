@@ -24,7 +24,7 @@ class OptimizationKernelCfg(CudaCoreKernelCfg):
         """Get kernel source files for a given kernel type.
 
         Args:
-            kernel_type: Type of kernel ("line_search", "lbfgs")
+            kernel_type: Type of kernel ("line_search", "lbfgs", "line_search_lbfgs")
 
         Returns:
             List of kernel filenames
@@ -32,6 +32,7 @@ class OptimizationKernelCfg(CudaCoreKernelCfg):
         kernel_files = {
             "line_search": ["line_search/line_search_kernel.cuh"],
             "lbfgs": ["lbfgs/lbfgs_step_kernel.cuh"],
+            "line_search_lbfgs": ["lbfgs/lbfgs_line_search_step_kernel.cuh"],
         }
         return kernel_files.get(kernel_type, [])
 
@@ -67,6 +68,22 @@ class LineSearchLaunchCfg:
         blocks_per_grid = batchsize
 
         return LaunchConfig(grid=blocks_per_grid, block=threads_per_block, shmem_size=0)
+
+
+class LineSearchLBFGSLaunchCfg:
+    """Launch configuration for the fused line search and L-BFGS step kernel."""
+
+    @staticmethod
+    def calculate_config(batch_size: int, v_dim: int, history_m: int) -> Tuple[LaunchConfig, int]:
+        """Launch configuration: one block of ``v_dim`` rounded up to 32 threads per problem.
+
+        Returns:
+            Tuple of (LaunchConfig, dynamic shared memory bytes)
+        """
+        dynamic_bytes = LBFGSLaunchCfg.compact_shared_memory_bytes(v_dim, history_m)
+        threads_per_block = ((v_dim + 31) // 32) * 32
+        config = LaunchConfig(grid=batch_size, block=threads_per_block, shmem_size=dynamic_bytes)
+        return config, dynamic_bytes
 
 
 class LBFGSLaunchCfg:
