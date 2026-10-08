@@ -295,7 +295,8 @@ class LineSearchStrategy(ABC):
         """
         x = x.unsqueeze(1)  # batch, 1, action_horizon, action_dim
         step_vec = step_vec.unsqueeze(1)  # batch, 1, action_horizon, action_dim
-        x_set = x + line_search_scales * step_vec  # batch, num_particles, action_horizon, action_dim
+        # One fused kernel: batch, num_particles, action_horizon, action_dim
+        x_set = torch.addcmul(x, line_search_scales, step_vec)
         return x_set
 
     @staticmethod
