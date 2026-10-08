@@ -52,6 +52,7 @@ void launch_line_search(
                   torch::Tensor rho_buffer,
                   torch::Tensor y_buffer,
                   torch::Tensor s_buffer,
+                  torch::Tensor gram_buffer,
                   torch::Tensor q,
                   torch::Tensor grad_q,
                   torch::Tensor x_0,

@@ -576,6 +576,16 @@ def test_convergence_comparison(optimizer_setup):
     assert final_cost_cuda == final_cost_no_cuda
 
 
+def gram_of(s_buffer: torch.Tensor, y_buffer: torch.Tensor) -> torch.Tensor:
+    """S^T Y and Y^T Y of [history, batch, opt_dim, 1] buffers, shape [batch, 2, history, history]."""
+    s = s_buffer.squeeze(-1)
+    y = y_buffer.squeeze(-1)
+    # Elementwise products: a matmul would follow the global TF32 setting.
+    s_y = (s.transpose(0, 1).unsqueeze(2) * y.transpose(0, 1).unsqueeze(1)).sum(-1)
+    y_y = (y.transpose(0, 1).unsqueeze(2) * y.transpose(0, 1).unsqueeze(1)).sum(-1)
+    return torch.stack([s_y, y_y], dim=1)
+
+
 @pytest.mark.parametrize("history", [5, 27])
 @pytest.mark.parametrize("use_shared_buffers", [True, False])
 def test_lbfgs_kernel_step_scaling_matches_scale_action(history, use_shared_buffers):
@@ -610,6 +620,7 @@ def test_lbfgs_kernel_step_scaling_matches_scale_action(history, use_shared_buff
             rho_buffer=rho_buffer,
             y_buffer=y_buffer,
             s_buffer=s_buffer,
+            gram_buffer=gram_of(s_buffer, y_buffer),
             q=q.view(batch, opt_dim),
             grad_q=grad_q.view(batch, 1, opt_dim),
             x_0=x_0,
@@ -635,5 +646,59 @@ def test_lbfgs_kernel_step_scaling_matches_scale_action(history, use_shared_buff
     ratio = (step_fused.abs() / action_step_max).amax(dim=(1, 2))
     assert torch.all(ratio <= 1.0 + 1e-5)
     # History buffers are unaffected by the step scaling.
-    for key in ("rho_buffer", "y_buffer", "s_buffer", "x_0", "grad_0"):
+    for key in ("rho_buffer", "y_buffer", "s_buffer", "gram_buffer", "x_0", "grad_0"):
         assert torch.equal(fused[key], ref[key]), key
+
+
+@pytest.mark.parametrize("history, opt_dim", [(1, 16), (5, 7), (15, 40), (27, 112), (28, 224)])
+def test_lbfgs_compact_kernel_matches_global_kernel(history, opt_dim):
+    """The compact kernel and the global-memory kernel take the same steps over many iterations,
+    and the compact kernel keeps the Gram buffer equal to S^T Y and Y^T Y of the history."""
+    from curobo._src.curobolib.cuda_ops.optimization import LBFGScu
+
+    device = torch.device("cuda:0")
+    batch = 3
+    gen = torch.Generator(device=device).manual_seed(0)
+    # Quadratic with eigenvalues in [1, 100].
+    basis, _ = torch.linalg.qr(torch.randn(batch, opt_dim, opt_dim, device=device, generator=gen))
+    eigenvalues = torch.logspace(0, 2, opt_dim, device=device)
+    hessian = basis @ torch.diag_embed(eigenvalues.expand(batch, opt_dim)) @ basis.transpose(1, 2)
+
+    def gradient(x: torch.Tensor) -> torch.Tensor:
+        return (hessian @ x.unsqueeze(-1)).squeeze(-1)
+
+    def make_state(x: torch.Tensor) -> dict:
+        return dict(
+            step_vec=torch.zeros(batch, opt_dim, device=device),
+            rho_buffer=torch.zeros(history, batch, 1, 1, device=device),
+            y_buffer=torch.zeros(history, batch, opt_dim, 1, device=device),
+            s_buffer=torch.zeros(history, batch, opt_dim, 1, device=device),
+            gram_buffer=torch.zeros(batch, 2, history, history, device=device),
+            x_0=x.unsqueeze(-1).clone(),
+            grad_0=gradient(x).unsqueeze(-1),
+        )
+
+    x = torch.randn(batch, opt_dim, device=device, generator=gen)
+    compact, global_memory = make_state(x), make_state(x)
+    x = x - 0.005 * gradient(x)
+    for _ in range(3 * history + 5):
+        steps = []
+        for state, use_shared_buffers in ((compact, True), (global_memory, False)):
+            step = LBFGScu.apply(
+                state["step_vec"], state["rho_buffer"], state["y_buffer"], state["s_buffer"],
+                state["gram_buffer"], x.clone(), gradient(x).view(batch, 1, opt_dim),
+                state["x_0"], state["grad_0"], 0.01, True, use_shared_buffers,
+            )
+            steps.append(step.view(batch, opt_dim).clone())
+        assert torch.allclose(steps[0], steps[1], rtol=1e-4, atol=1e-6 * steps[1].abs().max())
+        for key in ("s_buffer", "y_buffer", "x_0", "grad_0"):
+            assert torch.equal(compact[key], global_memory[key]), key
+        assert torch.allclose(compact["rho_buffer"], global_memory["rho_buffer"], rtol=1e-5)
+        expected_gram = gram_of(compact["s_buffer"], compact["y_buffer"])
+        assert torch.allclose(
+            compact["gram_buffer"], expected_gram, rtol=1e-5, atol=1e-6 * expected_gram.abs().max()
+        )
+        # Exact line search along the global kernel's step.
+        direction = steps[1]
+        curvature = (direction * gradient(direction)).sum(-1, keepdim=True)
+        x = x - (gradient(x) * direction).sum(-1, keepdim=True) / curvature * direction

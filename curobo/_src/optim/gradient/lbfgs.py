@@ -172,7 +172,16 @@ class LBFGSOpt:
 
         # Check CUDA kernel feasibility for step direction
         opt_dim = rollout_list[0].action_horizon * rollout_list[0].action_dim
-        shared_memory_needed = (((2 * opt_dim) + 2) * config.history + 32 + 1) * 4
+        # Shared memory of the compact kernel (compact_shared_memory_floats in
+        # lbfgs_step_helpers.cuh).
+        padded_dim = (opt_dim + 3) & ~3
+        vector_stride = padded_dim + ((4 - padded_dim) & 31)
+        shared_memory_needed = (
+            (2 * config.history + 1) * vector_stride
+            + 2 * config.history * (config.history | 1)
+            + 5 * config.history
+            + 34
+        ) * 4
         max_shared_memory = 65536
         if opt_dim >= 1024 or config.history > 31 or shared_memory_needed > max_shared_memory:
             if shared_memory_needed > max_shared_memory:
@@ -226,6 +235,7 @@ class LBFGSOpt:
                     self._qn.rho,
                     self._qn.y,
                     self._qn.s,
+                    self._qn.gram,
                     q,
                     grad_q,
                     self._qn.x_0,

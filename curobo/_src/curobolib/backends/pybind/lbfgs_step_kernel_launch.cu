@@ -28,203 +28,42 @@ namespace curobo{
 // LAUNCH HELPER FUNCTIONS AND STRUCTS
 // ============================================================================
 
-// Helper struct to hold launch configuration
-struct LBFGSLaunchCfg {
-    int threadsPerBlock;
-    int blocksPerGrid;
-    int shared_memory_size;
-    int max_shared_memory;
-    bool use_shared_buffers;
-    bool shared_memory_configured;
-};
+using LBFGSStepKernel = void(*)(float*, float*, float*, float*, float*, float*, float*,
+                                const float*, float, int, int, int, bool, const float*, int);
+using LBFGSCompactKernel = void(*)(float*, float*, float*, float*, float*, const float*, float*,
+                                   float*, const float*, float, int, int, int, bool,
+                                   const float*, int);
 
-// ============================================================================
-// ENHANCED KERNEL CONFIGURATION AND SELECTION (Design 3 Improved)
-// ============================================================================
-
-// Centralized kernel configuration with compile-time validation
-struct LBFGSKernelConfig {
-    // Single source of truth for supported history_m values
-    static constexpr std::array<int, 8> SUPPORTED_HISTORY_M = {5, 6, 7, 15, 24, 27, 28, 31};
-    static constexpr int MAX_HISTORY_M = 31;
-    static constexpr int MIN_HISTORY_M = 5;
-
-    // Compile-time validation - explicit for static_assert compatibility
-    static constexpr bool is_supported(int m) noexcept {
-        return m == 5 || m == 6 || m == 7 || m == 15 ||
-               m == 24 || m == 27 || m == 28 || m == 31;
-    }
-
-    // Runtime validation with detailed error info
-    static bool validate_history_m(int m) {
-        if (m < MIN_HISTORY_M || m > MAX_HISTORY_M) {
-            return false;
-        }
-        return is_supported(m);
-    }
-};
-
-// Strongly-typed kernel pair with metadata
-template<typename ScalarType, bool rolled_ys>
-struct LBFGSKernelPair {
-    using SharedKernel = void(*)(ScalarType*, ScalarType*, ScalarType*, ScalarType*,
-                                ScalarType*, ScalarType*, ScalarType*, const ScalarType*,
-                                float, int, int, int, bool, const ScalarType*, int);
-    using StableKernel = SharedKernel;  // Same signature
-
-    SharedKernel shared_memory_kernel;
-    StableKernel stable_kernel;
-    int specialized_for_history_m;  // -1 for runtime kernel
-    bool is_specialized;
-
-    constexpr LBFGSKernelPair(SharedKernel shared, StableKernel stable, int history_m = -1)
-        : shared_memory_kernel(shared), stable_kernel(stable),
-          specialized_for_history_m(history_m), is_specialized(history_m > 0) {}
-};
-
-// Helper function to calculate shared memory configuration
-inline LBFGSLaunchCfg calculate_lbfgs_launch_config(
-    int batch_size, int v_dim, int history_m, bool use_shared_buffers)
+// Kernels specialized for common history sizes; others use the runtime-history kernels.
+template<int M>
+inline void select_specialized_kernels(LBFGSCompactKernel& compact, LBFGSStepKernel& global)
 {
-    LBFGSLaunchCfg config;
-
-    // Basic configuration
-    config.threadsPerBlock = v_dim;
-    config.blocksPerGrid = batch_size;
-
-    // Calculate shared memory requirements
-    const int basic_smem_size = history_m * sizeof(float);
-    const int shared_buffer_smem_size = (((2 * v_dim) + 2) * history_m + 32 + 1) * sizeof(float);
-
-    // Shared memory limits
-    const int max_shared_base = 48000;
-    const int max_shared_allowed = 65536; // Turing limit
-
-    config.max_shared_memory = max_shared_base;
-    config.use_shared_buffers = false;
-    config.shared_memory_configured = false;
-
-    if (use_shared_buffers) {
-        config.shared_memory_size = shared_buffer_smem_size;
-
-        // Check if we can use shared buffers
-        if (curobo::common::isVoltaPlus &&
-            shared_buffer_smem_size > max_shared_base &&
-            shared_buffer_smem_size <= max_shared_allowed) {
-
-            config.max_shared_memory = shared_buffer_smem_size;
-            config.use_shared_buffers = true;
-        } else if (shared_buffer_smem_size <= max_shared_base) {
-            config.use_shared_buffers = true;
-        }
-    } else {
-        config.shared_memory_size = basic_smem_size;
-        config.use_shared_buffers = false;
-    }
-
-    return config;
+    compact = kernel_lbfgs_step_compact<float, M>;
+    global = kernel_lbfgs_step<float, false, M>;
 }
 
-// Helper function to configure shared memory for a kernel
-template<typename KernelType>
-inline bool configure_shared_memory(KernelType kernel, LBFGSLaunchCfg& config) {
-    if (!curobo::common::isVoltaPlus ||
-        config.max_shared_memory <= 48000 ||
-        !config.use_shared_buffers) {
-        return true;
+inline void select_lbfgs_kernels(int history_m, LBFGSCompactKernel& compact,
+                                 LBFGSStepKernel& global)
+{
+    switch (history_m) {
+        case 5:  select_specialized_kernels<5>(compact, global); return;
+        case 6:  select_specialized_kernels<6>(compact, global); return;
+        case 7:  select_specialized_kernels<7>(compact, global); return;
+        case 15: select_specialized_kernels<15>(compact, global); return;
+        case 24: select_specialized_kernels<24>(compact, global); return;
+        case 27: select_specialized_kernels<27>(compact, global); return;
+        case 28: select_specialized_kernels<28>(compact, global); return;
+        case 31: select_specialized_kernels<31>(compact, global); return;
+        default:
+            compact = kernel_lbfgs_step_compact<float>;
+            global = kernel_lbfgs_step<float, false>;
     }
-
-    cudaError_t result = cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, config.max_shared_memory);
-
-    if (result != cudaSuccess) {
-        config.max_shared_memory = 48000;
-        config.use_shared_buffers = (config.shared_memory_size <= config.max_shared_memory);
-        return false;
-    }
-
-    config.shared_memory_configured = true;
-    return true;
 }
-
-// Enhanced kernel factory with better interface and validation
-template<typename ScalarType, bool rolled_ys>
-class LBFGSKernelFactory {
-public:
-    using KernelPair = LBFGSKernelPair<ScalarType, rolled_ys>;
-
-    // Main selection interface - cleaner and more explicit
-    static constexpr KernelPair select_optimal_kernels(int history_m, bool prefer_specialized = true) {
-        if (!prefer_specialized || !LBFGSKernelConfig::is_supported(history_m)) {
-            return create_runtime_kernels();
-        }
-
-        return create_specialized_kernels(history_m);
-    }
-
-private:
-    // Specialized kernel creation - constexpr for each supported value
-    static constexpr KernelPair create_specialized_kernels(int history_m) {
-        // Clean switch with compile-time kernel creation
-        switch (history_m) {
-            case 5:  return make_specialized_pair<5>();
-            case 6:  return make_specialized_pair<6>();
-            case 7:  return make_specialized_pair<7>();
-            case 15: return make_specialized_pair<15>();
-            case 24: return make_specialized_pair<24>();
-            case 27: return make_specialized_pair<27>();
-            case 28: return make_specialized_pair<28>();
-            case 31: return make_specialized_pair<31>();
-            default: return create_runtime_kernels();  // Fallback
-        }
-    }
-
-    // Template helper - compile-time kernel pair creation
-    template<int M>
-    static constexpr KernelPair make_specialized_pair() {
-        static_assert(M > 0, "Specialized kernel requires positive history_m");
-        static_assert(LBFGSKernelConfig::is_supported(M),
-                     "history_m not in supported values list");
-
-        return KernelPair{
-            kernel_lbfgs_step_shared_memory<ScalarType, rolled_ys, M>,
-            kernel_lbfgs_step<ScalarType, rolled_ys, M>,
-            M
-        };
-    }
-
-    // Runtime kernel creation
-    static constexpr KernelPair create_runtime_kernels() {
-        return KernelPair{
-            kernel_lbfgs_step_shared_memory<ScalarType, rolled_ys>,
-            kernel_lbfgs_step<ScalarType, rolled_ys>,
-            -1  // Indicates runtime kernel
-        };
-    }
-};
-
-// Clean, modern interface for kernel selection
-template<typename ScalarType = float, bool rolled_ys = false>
-constexpr auto select_lbfgs_kernels(int history_m, bool use_fixed_m = true) {
-    using Factory = LBFGSKernelFactory<ScalarType, rolled_ys>;
-
-    // Self-documenting parameter names and behavior
-    return Factory::select_optimal_kernels(history_m, use_fixed_m);
-}
-
-// Convenience function with default template parameters
-constexpr auto select_lbfgs_kernels_float(int history_m, bool use_fixed_m = true) {
-    return select_lbfgs_kernels<float, false>(history_m, use_fixed_m);
-}
-
-// ============================================================================
-// SIMPLIFIED LAUNCH FUNCTION
-// ============================================================================
 
 std::vector<torch::Tensor>
 launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
-                torch::Tensor y_buffer, torch::Tensor s_buffer, torch::Tensor q,
-                torch::Tensor grad_q, torch::Tensor x_0, torch::Tensor grad_0,
+                torch::Tensor y_buffer, torch::Tensor s_buffer, torch::Tensor gram_buffer,
+                torch::Tensor q, torch::Tensor grad_q, torch::Tensor x_0, torch::Tensor grad_0,
                 const float epsilon, const int batch_size, const int history_m,
                 const int v_dim, const bool stable_mode, const bool use_shared_buffers,
                 torch::Tensor action_step_max, const bool scale_step)
@@ -234,6 +73,7 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
     curobo::common::validate_cuda_input(rho_buffer, "rho_buffer");
     curobo::common::validate_cuda_input(y_buffer, "y_buffer");
     curobo::common::validate_cuda_input(s_buffer, "s_buffer");
+    curobo::common::validate_cuda_input(gram_buffer, "gram_buffer");
     curobo::common::validate_cuda_input(q, "q");
     curobo::common::validate_cuda_input(x_0, "x_0");
     curobo::common::validate_cuda_input(grad_0, "grad_0");
@@ -245,29 +85,34 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
     const float* action_step_max_ptr = scale_step ? action_step_max.data_ptr<float>() : nullptr;
     const int action_dim = scale_step ? static_cast<int>(action_step_max.numel()) : 1;
 
-    // Basic validation
     assert(v_dim < 1024 && history_m < 32);
 
-    // Calculate launch configuration
-    auto config = calculate_lbfgs_launch_config(batch_size, v_dim, history_m, use_shared_buffers);
+    LBFGSCompactKernel compact_kernel;
+    LBFGSStepKernel global_kernel;
+    select_lbfgs_kernels(history_m, compact_kernel, global_kernel);
 
-        // Select appropriate kernels using enhanced interface
-    const bool use_fixed_m = true;
-    auto kernel_pair = select_lbfgs_kernels_float(history_m, use_fixed_m);
+    const int max_shared_base = 48000;
+    const int max_shared_allowed = 65536;
+    const int compact_smem_size =
+        lbfgs::compact_shared_memory_floats(v_dim, history_m) * sizeof(float);
 
-    // Configure shared memory if needed
-    bool shared_configured = configure_shared_memory(kernel_pair.shared_memory_kernel, config);
+    bool use_compact = use_shared_buffers && compact_smem_size <= max_shared_allowed;
+    if (use_compact && compact_smem_size > max_shared_base) {
+        use_compact = cudaFuncSetAttribute(
+            compact_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+            compact_smem_size) == cudaSuccess;
+    }
 
-    // Get CUDA stream
     cudaStream_t stream = curobo::common::get_cuda_stream();
 
-    // Launch appropriate kernel based on configuration
-    if (config.use_shared_buffers && config.shared_memory_size <= config.max_shared_memory) {
-        kernel_pair.shared_memory_kernel<<<config.blocksPerGrid, config.threadsPerBlock, config.shared_memory_size, stream>>>(
+    if (use_compact) {
+        const int threads = ((v_dim + 31) / 32) * 32;
+        compact_kernel<<<batch_size, threads, compact_smem_size, stream>>>(
             step_vec.data_ptr<float>(),
             rho_buffer.data_ptr<float>(),
             y_buffer.data_ptr<float>(),
             s_buffer.data_ptr<float>(),
+            gram_buffer.data_ptr<float>(),
             q.data_ptr<float>(),
             x_0.data_ptr<float>(),
             grad_0.data_ptr<float>(),
@@ -276,7 +121,7 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
             action_step_max_ptr, action_dim);
     } else {
         const int basic_smem_size = history_m * v_dim * sizeof(float);
-        kernel_pair.stable_kernel<<<config.blocksPerGrid, config.threadsPerBlock, basic_smem_size, stream>>>(
+        global_kernel<<<batch_size, v_dim, basic_smem_size, stream>>>(
             step_vec.data_ptr<float>(),
             rho_buffer.data_ptr<float>(),
             y_buffer.data_ptr<float>(),

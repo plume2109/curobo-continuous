@@ -193,6 +193,7 @@ class LBFGScu(Function):
         rho_buffer,
         y_buffer,
         s_buffer,
+        gram_buffer,
         q,
         grad_q,
         x_0,
@@ -203,6 +204,11 @@ class LBFGScu(Function):
         action_step_max=None,
     ):
         """Compute the L-BFGS step direction and update the history buffers in place.
+
+        ``gram_buffer`` has shape ``(batch, 2, m, m)`` and holds ``S^T Y`` then ``Y^T Y`` of
+        ``s_buffer`` and ``y_buffer`` (see :meth:`QuasiNewtonBuffers.refresh_gram`). The
+        shared-buffer kernel reads it instead of recomputing those dot products and keeps
+        it in sync with the history; the global-memory kernel leaves it unchanged.
 
         When ``action_step_max`` is given, each problem's step is divided by
         ``max(1, max_i |step_i| / action_step_max[i % action_dim])`` inside the kernel,
@@ -221,17 +227,21 @@ class LBFGScu(Function):
             rho_buffer=rho_buffer,
             y_buffer=y_buffer,
             s_buffer=s_buffer,
+            gram_buffer=gram_buffer,
             q=q,
             grad_q=grad_q,
             x_0=x_0,
             grad_0=grad_0,
         )
         m, b, v_dim, _ = y_buffer.shape
+        if gram_buffer.shape != (b, 2, m, m):
+            log_and_raise(f"gram_buffer must have shape ({b}, 2, {m}, {m}). Got {gram_buffer.shape}")
         R = optimization_cu.launch_lbfgs_step(
             step_vec,  # .view(-1),
             rho_buffer,  # .view(-1),
             y_buffer,  # .view(-1),
             s_buffer,  # .view(-1),
+            gram_buffer,
             q,
             grad_q,  # .view(-1),
             x_0,

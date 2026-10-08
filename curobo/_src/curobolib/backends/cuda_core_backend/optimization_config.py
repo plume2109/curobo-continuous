@@ -72,56 +72,50 @@ class LineSearchLaunchCfg:
 class LBFGSLaunchCfg:
     """Helper class for calculating launch configurations for LBFGS kernels"""
 
+    #: Dynamic shared memory available without opting in.
+    MAX_SHARED_BASE = 48000
+    #: Dynamic shared memory available after opting in (Volta+).
+    MAX_SHARED_ALLOWED = 65536
+
+    @staticmethod
+    def compact_shared_memory_bytes(v_dim: int, history_m: int) -> int:
+        """Shared memory used by ``kernel_lbfgs_step_compact``.
+
+        Matches ``compact_shared_memory_floats`` in ``lbfgs_step_helpers.cuh``.
+        """
+        padded_dim = (v_dim + 3) & ~3
+        vector_stride = padded_dim + ((4 - padded_dim) & 31)
+        gram_stride = history_m | 1
+        floats = (
+            (2 * history_m + 1) * vector_stride + 2 * history_m * gram_stride + 5 * history_m + 34
+        )
+        return floats * 4
+
     @staticmethod
     def calculate_config(
         batch_size: int, v_dim: int, history_m: int, use_shared_buffers: bool
     ) -> Tuple[LaunchConfig, bool, int]:
         """Calculate launch configuration for LBFGS step kernel.
 
-        Ported from calculate_lbfgs_launch_config in lbfgs_step_kernel_launch.cu (lines 93-133)
+        The compact kernel (shared buffers) runs ``v_dim`` rounded up to a multiple of 32
+        threads per problem. The global-memory kernel runs ``v_dim`` threads.
 
         Args:
             batch_size: Number of batches
             v_dim: Variable dimension
             history_m: History size
-            use_shared_buffers: Whether to use shared memory buffers
+            use_shared_buffers: Whether to use the compact shared memory kernel
 
         Returns:
             Tuple of (LaunchConfig, use_shared_buffers_actual, max_shared_memory_needed)
         """
-        threads_per_block = v_dim
-        blocks_per_grid = batch_size
+        compact_smem_size = LBFGSLaunchCfg.compact_shared_memory_bytes(v_dim, history_m)
+        if use_shared_buffers and compact_smem_size <= LBFGSLaunchCfg.MAX_SHARED_ALLOWED:
+            threads_per_block = ((v_dim + 31) // 32) * 32
+            config = LaunchConfig(
+                grid=batch_size, block=threads_per_block, shmem_size=compact_smem_size
+            )
+            return config, True, max(compact_smem_size, LBFGSLaunchCfg.MAX_SHARED_BASE)
 
-        # Calculate shared memory requirements
-        basic_smem_size = history_m * 4  # sizeof(float) = 4
-        shared_buffer_smem_size = (((2 * v_dim) + 2) * history_m + 32 + 1) * 4
-
-        # Shared memory limits
-        max_shared_base = 48000
-        max_shared_allowed = 65536  # Turing/Volta+ limit
-
-        # Determine if we can use shared buffers
-        use_shared_buffers_actual = False
-        shared_mem_size = basic_smem_size
-        max_shared_memory_needed = max_shared_base
-
-        if use_shared_buffers:
-            shared_mem_size = shared_buffer_smem_size
-
-            # Check if we can fit in base shared memory
-            if shared_buffer_smem_size <= max_shared_base:
-                use_shared_buffers_actual = True
-                max_shared_memory_needed = shared_buffer_smem_size
-            # Check if we need extended shared memory (Volta+)
-            elif shared_buffer_smem_size <= max_shared_allowed:
-                use_shared_buffers_actual = True
-                max_shared_memory_needed = shared_buffer_smem_size
-                # Note: Caller must configure cudaFuncAttributeMaxDynamicSharedMemorySize
-        else:
-            shared_mem_size = basic_smem_size
-
-        config = LaunchConfig(
-            grid=blocks_per_grid, block=threads_per_block, shmem_size=shared_mem_size
-        )
-
-        return config, use_shared_buffers_actual, max_shared_memory_needed
+        config = LaunchConfig(grid=batch_size, block=v_dim, shmem_size=history_m * 4)
+        return config, False, LBFGSLaunchCfg.MAX_SHARED_BASE

@@ -132,69 +132,6 @@ namespace lbfgs{
     }
 
     /**
-     * @brief Updates L-BFGS history buffers from shared memory data (unified optimized)
-     *
-     * This unified function avoids redundant global memory reads by using the already-shifted
-     * data from shared memory buffers. Uses constexpr to optimize for compile-time
-     * known history sizes while supporting runtime sizes.
-     *
-     * @tparam ScalarType Floating point type (float/double)
-     * @tparam HISTORY_M Compile-time history size (use -1 for runtime)
-     * @param thread_idx Current thread index within batch
-     * @param batch Current batch index
-     * @param batchsize Total batch size
-     * @param v_dim Optimization dimension size
-     * @param history_m Runtime history size (ignored if HISTORY_M > 0)
-     * @param y_buffer_sh Shared memory y buffer (already contains shifted data)
-     * @param s_buffer_sh Shared memory s buffer (already contains shifted data)
-     * @param y_buffer Global y history buffer (output)
-     * @param s_buffer Global s history buffer (output)
-     */
-    template<typename ScalarType, int HISTORY_M = -1>
-    __device__ __forceinline__ void update_lbfgs_history_buffers_from_shared(
-        const int thread_idx,
-        const int batch,
-        const int batchsize,
-        const int v_dim,
-        const int history_m,
-        const float* y_buffer_sh,
-        const float* s_buffer_sh,
-        ScalarType* y_buffer,
-        ScalarType* s_buffer)
-    {
-        const uint32_t batch_vdim_tidx = batch * v_dim + thread_idx;
-
-        // Use compile-time or runtime history size
-        constexpr bool is_compile_time = (HISTORY_M > 0);
-        uint32_t current_shared_idx = 0;
-
-        // Copy already-shifted data from shared memory to global memory
-        // The shared memory already contains the properly shifted history with new values
-        if constexpr (is_compile_time) {
-            current_shared_idx = HISTORY_M * thread_idx;
-
-            // Compile-time version with loop unrolling
-            #pragma unroll
-            for (int i = 0; i < HISTORY_M; i++) {
-                const uint32_t global_idx = i * batchsize * v_dim + batch_vdim_tidx;
-
-                s_buffer[global_idx] = static_cast<ScalarType>(s_buffer_sh[current_shared_idx + i]);
-                y_buffer[global_idx] = static_cast<ScalarType>(y_buffer_sh[current_shared_idx + i]);
-            }
-        } else {
-            // Runtime version
-            current_shared_idx = history_m * thread_idx;
-
-            for (int i = 0; i < history_m; i++) {
-                const uint32_t global_idx = i * batchsize * v_dim + batch_vdim_tidx;
-
-                s_buffer[global_idx] = static_cast<ScalarType>(s_buffer_sh[current_shared_idx + i]);
-                y_buffer[global_idx] = static_cast<ScalarType>(y_buffer_sh[current_shared_idx + i]);
-            }
-        }
-    }
-
-    /**
      * @brief Updates rho buffer with new curvature information
      *
      * This function computes the new rho value (1 / (y^T * s)) and updates
@@ -457,257 +394,6 @@ namespace lbfgs{
     }
 
     /**
-     * @brief Copy buffers to shared memory for optimized access (unified version)
-     *
-     * This unified function copies relevant portions of the history buffers to shared memory
-     * and enables faster access patterns. Uses constexpr to optimize for compile-time
-     * known history sizes while supporting runtime sizes.
-     *
-     * @tparam ScalarType Floating point type (float/double)
-     * @tparam HISTORY_M Compile-time history size (use -1 for runtime)
-     * @param thread_idx Current thread index within batch
-     * @param batch Current batch index
-     * @param batchsize Total batch size
-     * @param v_dim Optimization dimension size
-     * @param history_m Runtime history size (ignored if HISTORY_M > 0)
-     * @param y Latest y vector value
-     * @param s Latest s vector value
-     * @param y_buffer Global y history buffer
-     * @param s_buffer Global s history buffer
-     * @param rho_buffer Global rho history buffer
-     * @param y_buffer_sh Shared memory y buffer (output)
-     * @param s_buffer_sh Shared memory s buffer (output)
-     * @param rho_buffer_sh Shared memory rho buffer (output)
-     * @param rolled_ys Whether buffers are pre-rolled (only used for runtime)
-     */
-    template<typename ScalarType, int HISTORY_M = -1>
-    __device__ __forceinline__ void copy_buffers_to_shared_memory(
-        const int thread_idx,
-        const int batch,
-        const int batchsize,
-        const int v_dim,
-        const int history_m,
-        const ScalarType y,
-        const ScalarType s,
-        const ScalarType* y_buffer,
-        const ScalarType* s_buffer,
-        const ScalarType* rho_buffer,
-        float* y_buffer_sh,
-        float* s_buffer_sh,
-        float* rho_buffer_sh,
-        const bool rolled_ys = false)
-    {
-        const uint32_t batch_vdim_tidx = batch * v_dim + thread_idx;
-
-        // Use compile-time or runtime history size
-        constexpr bool is_compile_time = (HISTORY_M > 0);
-        const int effective_history_m = is_compile_time ? HISTORY_M : history_m;
-        const uint32_t current_shared_idx = effective_history_m * thread_idx;
-
-        // Copy existing history to shared memory
-        if constexpr (is_compile_time) {
-            // Compile-time version with loop unrolling
-            #pragma unroll
-            for (int i = 1; i < HISTORY_M; i++) {
-                float yt = y_buffer[i * batchsize * v_dim + batch_vdim_tidx];
-                float st = s_buffer[i * batchsize * v_dim + batch_vdim_tidx];
-
-                y_buffer_sh[current_shared_idx + i - 1] = yt;
-                s_buffer_sh[current_shared_idx + i - 1] = st;
-            }
-        } else {
-            // Runtime version with conditional rolling support
-            if (!rolled_ys) {
-                for (int i = 1; i < effective_history_m; i++) {
-                    float yt = y_buffer[i * batchsize * v_dim + batch_vdim_tidx];
-                    float st = s_buffer[i * batchsize * v_dim + batch_vdim_tidx];
-
-                    y_buffer_sh[current_shared_idx + i - 1] = yt;
-                    s_buffer_sh[current_shared_idx + i - 1] = st;
-                }
-            }
-        }
-
-        // Store new values at the end
-        s_buffer_sh[current_shared_idx + effective_history_m - 1] = s;
-        y_buffer_sh[current_shared_idx + effective_history_m - 1] = y;
-
-        // Copy rho values to shared memory (limited threads participate)
-        if constexpr (is_compile_time) {
-            if (thread_idx < HISTORY_M - 1) {
-                ScalarType rho = rho_buffer[(thread_idx + 1) * batchsize + batch];
-                rho_buffer_sh[thread_idx] = rho;
-            }
-        } else {
-            if (thread_idx < effective_history_m - 1) {
-                ScalarType rho = rho_buffer[(thread_idx + 1) * batchsize + batch];
-                rho_buffer_sh[thread_idx] = rho;
-            }
-            if (thread_idx == effective_history_m - 1) {
-                ScalarType rho = rho_buffer[thread_idx * batchsize + batch];
-                rho_buffer_sh[thread_idx] = rho;
-            }
-        }
-    }
-
-    /**
-     * @brief Perform L-BFGS backward pass using shared memory buffers
-     *
-     * Optimized version of the backward pass that uses shared memory for faster access.
-     *
-     * @tparam ScalarType Floating point type (float/double)
-     * @tparam HISTORY_M Compile-time history size
-     * @param thread_idx Current thread index within batch
-     * @param v_dim Optimization dimension size
-     * @param gq Search direction (input/output)
-     * @param s_buffer_sh Shared memory s buffer
-     * @param y_buffer_sh Shared memory y buffer
-     * @param rho_buffer_sh Shared memory rho buffer
-     * @param alpha_buffer_sh Shared memory alpha buffer (output)
-     * @param data Temporary reduction buffer
-     * @param result Reduction result buffer
-     */
-    template<typename ScalarType, int HISTORY_M>
-    __device__ __forceinline__ void lbfgs_backward_pass_shared(
-        const int thread_idx,
-        const int v_dim,
-        const int history_m,
-        ScalarType& gq,
-        const float* s_buffer_sh,
-        const float* y_buffer_sh,
-        const float* rho_buffer_sh,
-        float* alpha_buffer_sh,
-        ScalarType* data,
-        float* result)
-    {
-        const uint32_t current_shared_idx = history_m * thread_idx;
-
-        constexpr bool is_compile_time = (HISTORY_M > 0);
-
-        if constexpr (is_compile_time) {
-
-            for (int i = HISTORY_M - 1; i > -1; i--) {
-                float current_s = s_buffer_sh[current_shared_idx + i];
-                float current_y = y_buffer_sh[current_shared_idx + i];
-                float current_rho = rho_buffer_sh[i];
-
-
-                // Compute s^T * gq
-                curobo::common::block_reduce_sum(gq * current_s, v_dim, &data[0], &result[0]);
-
-                // alpha_i = rho_i * s_i^T * gq
-                float current_alpha = result[0] * current_rho;
-
-                // gq = gq - alpha_i * y_i
-                gq = gq - current_alpha * current_y;
-                if (thread_idx == 0)
-                {
-                    alpha_buffer_sh[i] = current_alpha;
-                }
-
-            }
-        } else {
-            for (int i = history_m - 1; i > -1; i--) {
-                float current_s = s_buffer_sh[current_shared_idx + i];
-                float current_y = y_buffer_sh[current_shared_idx + i];
-                float current_rho = rho_buffer_sh[i];
-
-
-                // Compute s^T * gq
-                curobo::common::block_reduce_sum(gq * current_s, v_dim, &data[0], &result[0]);
-
-                // alpha_i = rho_i * s_i^T * gq
-                float current_alpha = result[0] * current_rho;
-
-                // gq = gq - alpha_i * y_i
-                gq = gq - current_alpha * current_y;
-                if (thread_idx == 0)
-                {
-                    alpha_buffer_sh[i] = current_alpha;
-                }
-
-            }
-
-        }
-    }
-
-    /**
-     * @brief Perform L-BFGS forward pass using shared memory buffers
-     *
-     * Optimized version of the forward pass that uses shared memory for faster access.
-     *
-     * @tparam ScalarType Floating point type (float/double)
-     * @tparam HISTORY_M Compile-time history size
-     * @param thread_idx Current thread index within batch
-     * @param v_dim Optimization dimension size
-     * @param gq Search direction (input/output)
-     * @param s_buffer_sh Shared memory s buffer
-     * @param y_buffer_sh Shared memory y buffer
-     * @param rho_buffer_sh Shared memory rho buffer
-     * @param alpha_buffer_sh Shared memory alpha buffer
-     * @param data Temporary reduction buffer
-     * @param result Reduction result buffer
-     */
-    template<typename ScalarType, int HISTORY_M>
-    __device__ __forceinline__ void lbfgs_forward_pass_shared(
-        const int thread_idx,
-        const int v_dim,
-        const int history_m,
-
-        ScalarType& gq,
-        const float* s_buffer_sh,
-        const float* y_buffer_sh,
-        const float* rho_buffer_sh,
-        const float* alpha_buffer_sh,
-        ScalarType* data,
-        float* result)
-    {
-        constexpr bool is_compile_time = (HISTORY_M > 0);
-        const uint32_t current_shared_idx = history_m * thread_idx;
-
-
-        if constexpr (is_compile_time) {
-
-
-            for (int i = 0; i < HISTORY_M; i++) {
-                float current_y = y_buffer_sh[current_shared_idx + i];
-                float current_s = s_buffer_sh[current_shared_idx + i];
-                //float current_alpha = alpha_buffer_sh[thread_idx * HISTORY_M + i];
-                float current_alpha = alpha_buffer_sh[i];
-
-                float current_rho = rho_buffer_sh[i];
-
-                // Compute y^T * gq
-                curobo::common::block_reduce_sum(gq * current_y, v_dim, &data[0], &result[0]);
-
-                // beta = rho_i * y_i^T * gq
-                float beta = result[0] * current_rho;
-
-                // gq = gq + (alpha_i - beta) * s_i
-                gq = gq + (current_alpha - beta) * current_s;
-            }
-        } else {
-            for (int i = 0; i < history_m; i++) {
-                float current_y = y_buffer_sh[current_shared_idx + i];
-                float current_s = s_buffer_sh[current_shared_idx + i];
-                //float current_alpha = alpha_buffer_sh[thread_idx * history_m + i];
-                float current_alpha = alpha_buffer_sh[i];
-
-                float current_rho = rho_buffer_sh[i];
-
-                // Compute y^T * gq
-                curobo::common::block_reduce_sum(gq * current_y, v_dim, &data[0], &result[0]);
-
-                // beta = rho_i * y_i^T * gq
-                float beta = result[0] * current_rho;
-
-                // gq = gq + (alpha_i - beta) * s_i
-                gq = gq + (current_alpha - beta) * current_s;
-            }
-        }
-    }
-
-    /**
      * @brief Scales a problem's step so that no action dimension exceeds its step limit
      *
      * Computes scale = max(1, max_i |step_i| / action_step_max[i % action_dim]) over the
@@ -734,6 +420,257 @@ namespace lbfgs{
         curobo::common::block_reduce_max(ratio, v_dim, &data[0], result);
         const ScalarType scale = fmaxf(result[0], 1.0f);
         return step / scale;
+    }
+
+    ////////////////////
+    // Compact L-BFGS
+    //
+    // The two-loop recursion only needs dot products between g, s_i and y_i. The compact
+    // kernel keeps S^T Y and Y^T Y in a persistent per-problem buffer (gram), so each
+    // iteration computes only the dot products that involve the new pair (s, y) or the new
+    // gradient g, runs the recursion on scalars in one warp, and builds the step as
+    // d = gamma * g + sum_i a_i * s_i + sum_i b_i * y_i.
+    //
+    // Shared memory holds each s_i, y_i and g as a zero-padded row of vector_stride floats.
+    // vector_stride is a multiple of 4 (float4 loads) and is 4 mod 32, so threads reading
+    // float4s at the same offset of consecutive rows hit distinct banks.
+    ////////////////////
+
+    /** Row stride of the m x m Gram matrices in shared memory (odd, to avoid bank conflicts). */
+    __host__ __device__ __forceinline__ int compact_gram_stride(const int history_m)
+    {
+        return history_m | 1;
+    }
+
+    /** Row stride of the s_i, y_i and g vectors in shared memory. */
+    __host__ __device__ __forceinline__ int compact_vector_stride(const int v_dim)
+    {
+        const int padded_dim = (v_dim + 3) & ~3;
+        return padded_dim + ((4 - padded_dim) & 31);
+    }
+
+    /**
+     * @brief Shared memory floats needed by kernel_lbfgs_step_compact.
+     *
+     * Layout: s and y rows (2 * history_m * vector_stride), g (vector_stride), S^T Y and
+     * Y^T Y (2 * history_m * gram_stride), s^T g, y^T g, rho, two coefficient arrays
+     * (5 * history_m), gamma (1) and the block reduction scratch (32 + 1).
+     */
+    __host__ __device__ __forceinline__ int compact_shared_memory_floats(
+        const int v_dim, const int history_m)
+    {
+        const int vector_stride = compact_vector_stride(v_dim);
+        const int gram_stride = compact_gram_stride(history_m);
+        return (2 * history_m + 1) * vector_stride + 2 * history_m * gram_stride +
+               5 * history_m + 1 + 33;
+    }
+
+    /**
+     * @brief Dot product of two zero-padded shared memory rows with float4 loads.
+     *
+     * @param a First row, 16-byte aligned
+     * @param b Second row, 16-byte aligned
+     * @param padded_dim Row length, a multiple of 4
+     */
+    __device__ __forceinline__ float row_dot(
+        const float* a, const float* b, const int padded_dim)
+    {
+        const float4* a4 = reinterpret_cast<const float4*>(a);
+        const float4* b4 = reinterpret_cast<const float4*>(b);
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+        for (int t = 0; t < padded_dim / 4; t++) {
+            const float4 x = a4[t];
+            const float4 y = b4[t];
+            acc0 = fmaf(x.x, y.x, acc0);
+            acc1 = fmaf(x.y, y.y, acc1);
+            acc2 = fmaf(x.z, y.z, acc2);
+            acc3 = fmaf(x.w, y.w, acc3);
+        }
+        return (acc0 + acc1) + (acc2 + acc3);
+    }
+
+    /**
+     * @brief Computes the 5 * history_m - 1 dot products the new iteration adds, one per thread.
+     *
+     * With newest = history_m - 1, writes S^T Y row and column newest, Y^T Y row and column
+     * newest, s_i^T g and y_i^T g for every i, and rho_newest = 1 / (s^T y) (0 when
+     * s^T y <= 0 in stable mode).
+     *
+     * @param history_m History size
+     * @param vector_stride Row stride of s_sh, y_sh (compact_vector_stride)
+     * @param gram_stride Row stride of sy_sh, yy_sh (compact_gram_stride)
+     * @param padded_dim v_dim rounded up to a multiple of 4; rows are zero past v_dim
+     * @param s_sh History s rows, oldest first. Row i at s_sh[i * vector_stride]
+     * @param y_sh History y rows, same layout as s_sh
+     * @param g_sh Current gradient row
+     * @param sy_sh S^T Y, (i, j) = s_i^T y_j at sy_sh[i * gram_stride + j] (output row/column)
+     * @param yy_sh Y^T Y, same layout as sy_sh (output row/column)
+     * @param sg_sh s_i^T g (output). Shape: (history_m)
+     * @param yg_sh y_i^T g (output). Shape: (history_m)
+     * @param rho_sh rho history; entry newest is written (output). Shape: (history_m)
+     * @param stable_mode Whether to zero rho for non-positive curvature
+     */
+    __device__ __forceinline__ void compute_new_gram_entries(
+        const int history_m,
+        const int vector_stride,
+        const int gram_stride,
+        const int padded_dim,
+        const float* s_sh,
+        const float* y_sh,
+        const float* g_sh,
+        float* sy_sh,
+        float* yy_sh,
+        float* sg_sh,
+        float* yg_sh,
+        float* rho_sh,
+        const bool stable_mode)
+    {
+        const int newest = history_m - 1;
+        const int num_dots = 5 * history_m - 1;
+
+        for (int k = threadIdx.x; k < num_dots; k += blockDim.x) {
+            // Dot product k: kind 0: s_newest^T y_col, 1: s_col^T y_newest (col < newest),
+            // 2: y_newest^T y_col, 3: s_col^T g, 4: y_col^T g.
+            int kind, col;
+            if (k < history_m) {
+                kind = 0; col = k;
+            } else if (k < 2 * history_m - 1) {
+                kind = 1; col = k - history_m;
+            } else {
+                const int r = k - (2 * history_m - 1);
+                kind = 2 + r / history_m;
+                col = r % history_m;
+            }
+
+            const float* a = (kind == 0) ? s_sh + newest * vector_stride :
+                             (kind == 1 || kind == 3) ? s_sh + col * vector_stride :
+                             (kind == 2) ? y_sh + newest * vector_stride :
+                             y_sh + col * vector_stride;
+            const float* b = (kind == 0 || kind == 2) ? y_sh + col * vector_stride :
+                             (kind == 1) ? y_sh + newest * vector_stride : g_sh;
+
+            const float value = row_dot(a, b, padded_dim);
+
+            if (kind == 0) {
+                sy_sh[newest * gram_stride + col] = value;
+                if (col == newest) {
+                    float rho = 1.0f / value;
+                    if (stable_mode && (value <= 0.0f)) {
+                        rho = 0.0f;
+                    }
+                    rho_sh[newest] = rho;
+                }
+            } else if (kind == 1) {
+                sy_sh[col * gram_stride + newest] = value;
+            } else if (kind == 2) {
+                yy_sh[newest * gram_stride + col] = value;
+                yy_sh[col * gram_stride + newest] = value;
+            } else if (kind == 3) {
+                sg_sh[col] = value;
+            } else {
+                yg_sh[col] = value;
+            }
+        }
+    }
+
+    /**
+     * @brief Runs the L-BFGS two-loop recursion on scalars in one warp.
+     *
+     * Lane i owns history pair i (history_m <= 31). With alpha_j and c_j = alpha_j - beta_j
+     * of the textbook two-loop recursion:
+     *   s_i^T q_i = s_i^T g - sum_{j > i} alpha_j (S^T Y)_ij
+     *   y_i^T r_i = gamma (y_i^T g - sum_j alpha_j (Y^T Y)_ij) + sum_{k < i} c_k (S^T Y)_ki
+     * Each step broadcasts one coefficient with a shuffle and updates the remaining lanes,
+     * so the recursion has no block synchronization. The step direction is
+     * -(gamma g + sum_i c_i s_i - gamma sum_i alpha_i y_i).
+     *
+     * Must be called by all 32 lanes of one warp.
+     *
+     * @tparam FixedM Compile-time history size (-1 for runtime)
+     * @param history_m Runtime history size (ignored if FixedM > 0)
+     * @param gram_stride Row stride of sy_sh and yy_sh (compact_gram_stride)
+     * @param sy_sh S^T Y
+     * @param yy_sh Y^T Y
+     * @param sg_sh s_i^T g
+     * @param yg_sh y_i^T g
+     * @param rho_sh rho history
+     * @param epsilon Gamma used when s^T y / y^T y is not finite (stable mode)
+     * @param stable_mode Whether to apply stability checks
+     * @param coef_s Output coefficients of s_i, c_i
+     * @param coef_y Output coefficients of y_i, -gamma * alpha_i
+     * @param gamma_sh Output Hessian scaling gamma
+     */
+    template<int FixedM = -1>
+    __device__ __forceinline__ void compact_two_loop_coefficients(
+        const int history_m,
+        const int gram_stride,
+        const float* sy_sh,
+        const float* yy_sh,
+        const float* sg_sh,
+        const float* yg_sh,
+        const float* rho_sh,
+        const float epsilon,
+        const bool stable_mode,
+        float* coef_s,
+        float* coef_y,
+        float* gamma_sh)
+    {
+        constexpr bool is_compile_time = (FixedM > 0);
+        const int m = is_compile_time ? FixedM : history_m;
+        const int lane = threadIdx.x % curobo::common::warpSize;
+        const bool active = lane < m;
+        const float rho = active ? rho_sh[lane] : 0.0f;
+
+        // Backward pass: alpha_i = rho_i * s_i^T q_i, from newest to oldest. Each lane also
+        // accumulates y_lane^T q = y_lane^T g - sum_j alpha_j (Y^T Y)_lane,j for the forward pass.
+        float r = active ? sg_sh[lane] : 0.0f;
+        float yq = active ? yg_sh[lane] : 0.0f;
+        float alpha = 0.0f;
+        #pragma unroll
+        for (int i = m - 1; i >= 0; i--) {
+            const float alpha_i = __shfl_sync(curobo::common::fullMask, rho * r, i);
+            if (lane == i) {
+                alpha = alpha_i;
+            }
+            if (lane < i) {
+                r = fmaf(-alpha_i, sy_sh[lane * gram_stride + i], r);
+            }
+            if (active) {
+                yq = fmaf(-alpha_i, yy_sh[lane * gram_stride + i], yq);
+            }
+        }
+
+        // gamma = s^T y / y^T y of the newest pair, as in compute_lbfgs_scaling.
+        const int newest = m - 1;
+        float var1 = sy_sh[newest * gram_stride + newest] / yy_sh[newest * gram_stride + newest];
+        if (stable_mode && (isinf(var1) || isnan(var1))) {
+            var1 = epsilon;
+        }
+        const float gamma = curobo::common::relu(var1);
+
+        // y_i^T (gamma * q)
+        float u = gamma * yq;
+
+        // Forward pass: c_i = alpha_i - rho_i * y_i^T r_i, from oldest to newest.
+        float c = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < m; i++) {
+            const float c_i = __shfl_sync(curobo::common::fullMask, alpha - rho * u, i);
+            if (lane == i) {
+                c = c_i;
+            }
+            if (lane > i && active) {
+                u = fmaf(c_i, sy_sh[i * gram_stride + lane], u);
+            }
+        }
+
+        if (active) {
+            coef_s[lane] = c;
+            coef_y[lane] = -gamma * alpha;
+        }
+        if (lane == 0) {
+            gamma_sh[0] = gamma;
+        }
     }
 
 } // namespace lbfgs
