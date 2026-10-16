@@ -403,6 +403,7 @@ class SolverCore:
     @record_function_if_profiling("solver_core/enable_joint_position_tracking")
     def enable_joint_position_tracking(self) -> None:
         """Enable joint position tracking."""
+        self._joint_position_tracking = True
         for rollout in self.get_all_rollout_instances(include_optimizer_rollouts=True):
             cspace_costs = rollout.get_cost_component_by_name("cspace")
             for cspace_cost in cspace_costs:
@@ -416,6 +417,11 @@ class SolverCore:
     @record_function_if_profiling("solver_core/disable_joint_position_tracking")
     def disable_joint_position_tracking(self) -> None:
         """Disable joint position tracking."""
+        # idempotent: MPC calls this at every goal update; the weight writes and the rollout
+        # walk are only needed when the state actually changes
+        if getattr(self, "_joint_position_tracking", None) is False:
+            return
+        self._joint_position_tracking = False
         for rollout in self.get_all_rollout_instances(include_optimizer_rollouts=True):
             cspace_costs = rollout.get_cost_component_by_name("cspace")
             for cspace_cost in cspace_costs:
