@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -887,7 +889,7 @@ def test_clear_region_removes_stale_rgb_and_features(warp_init, device):
         )
     )
 
-    n_cleared = mapper.clear_region(
+    n_cleared = mapper.clear_regions(
         torch.tensor([-1.0, -1.0, 0.5], dtype=torch.float32, device=device),
         torch.tensor([1.0, 1.0, 1.5], dtype=torch.float32, device=device),
     )
@@ -1032,3 +1034,287 @@ def test_two_camera_mapper_averages_rgb_and_features(warp_init, device):
         atol=0.03,
         rtol=0.0,
     )
+
+
+def _bumpy_scene_mapper(device: str) -> Mapper:
+    """Mapper holding a plane with raised patches, so blocks are allocated at several depths."""
+    depth = torch.full((IMAGE_H, IMAGE_W), PLANE_Z, dtype=torch.float32, device=device)
+    depth[4:12, 5:15] = PLANE_Z - 0.15
+    depth[18:28, 22:36] = PLANE_Z - 0.3
+    depth[2:6, 30:38] = PLANE_Z + 0.1
+    rgb = torch.full((IMAGE_H, IMAGE_W, 3), 120, dtype=torch.uint8, device=device)
+    mapper = _make_mapper(device)
+    mapper.integrate(_observation(device=device, depth=depth, rgb=rgb))
+    return mapper
+
+
+def _tsdf_tensors(mapper: Mapper) -> dict[str, torch.Tensor]:
+    """Every tensor of the TSDF storage, cloned."""
+    return {
+        name: value.clone()
+        for name, value in vars(mapper.tsdf.data).items()
+        if isinstance(value, torch.Tensor)
+    }
+
+
+def _restore_tsdf_tensors(mapper: Mapper, saved: dict[str, torch.Tensor]) -> None:
+    for name, value in saved.items():
+        getattr(mapper.tsdf.data, name).copy_(value)
+
+
+def _reference_aabb_to_block_bounds(tsdf, bounds_min, bounds_max) -> tuple:
+    """Frozen copy of the former single-box ``_world_aabb_to_block_bounds`` (host, float64).
+
+    Kept as the reference the batched on-device conversion must reproduce exactly.
+    """
+    lo_in = (
+        torch.as_tensor(
+            bounds_min,
+            dtype=torch.float32,
+        )
+        .flatten()
+        .detach()
+        .cpu()
+    )
+    hi_in = (
+        torch.as_tensor(
+            bounds_max,
+            dtype=torch.float32,
+        )
+        .flatten()
+        .detach()
+        .cpu()
+    )
+    if lo_in.numel() != 3 or hi_in.numel() != 3:
+        log_and_raise(
+            "clear_region bounds must each contain 3 values, got "
+            f"bounds_min={tuple(lo_in.shape)}, bounds_max={tuple(hi_in.shape)}."
+        )
+
+    lo = torch.minimum(lo_in, hi_in)
+    hi = torch.maximum(lo_in, hi_in)
+    if not torch.isfinite(lo).all() or not torch.isfinite(hi).all():
+        log_and_raise("clear_region bounds must be finite.")
+
+    origin = tsdf.data.origin.detach().to(device="cpu", dtype=torch.float32).flatten()
+    voxel_size = float(tsdf.config.voxel_size)
+    block_size = int(tsdf.block_size)
+
+    grid_D, grid_H, grid_W = (int(v) for v in tsdf.config.grid_shape)
+
+    center_offset = (
+        torch.tensor(
+            [grid_W, grid_H, grid_D],
+            dtype=torch.float32,
+        )
+        * 0.5
+    )
+    v_lo = (lo - origin) / voxel_size + center_offset
+    v_hi = (hi - origin) / voxel_size + center_offset
+
+    # Include blocks touching exact AABB boundaries. This can over-clear
+    # one adjacent block on boundary-aligned regions, but avoids misses.
+    eps_voxels = 1.0e-6
+    min_bx = math.floor((float(v_lo[0]) - eps_voxels) / block_size)
+    min_by = math.floor((float(v_lo[1]) - eps_voxels) / block_size)
+    min_bz = math.floor((float(v_lo[2]) - eps_voxels) / block_size)
+    max_bx = math.floor((float(v_hi[0]) + eps_voxels) / block_size)
+    max_by = math.floor((float(v_hi[1]) + eps_voxels) / block_size)
+    max_bz = math.floor((float(v_hi[2]) + eps_voxels) / block_size)
+
+    max_grid_bx = math.ceil(grid_W / block_size) - 1
+    max_grid_by = math.ceil(grid_H / block_size) - 1
+    max_grid_bz = math.ceil(grid_D / block_size) - 1
+    if max_grid_bx < 0 or max_grid_by < 0 or max_grid_bz < 0:
+        return 0, 0, 0, 0, 0, 0, grid_W, grid_H, grid_D
+    if (
+        max_bx < 0
+        or max_by < 0
+        or max_bz < 0
+        or min_bx > max_grid_bx
+        or min_by > max_grid_by
+        or min_bz > max_grid_bz
+    ):
+        return 0, 0, 0, 0, 0, 0, grid_W, grid_H, grid_D
+    min_bx = max(min_bx, 0)
+    min_by = max(min_by, 0)
+    min_bz = max(min_bz, 0)
+    max_bx = min(max_bx, max_grid_bx)
+    max_by = min(max_by, max_grid_by)
+    max_bz = min(max_bz, max_grid_bz)
+
+    offset_x = (max_grid_bx + 1) // 2
+    offset_y = (max_grid_by + 1) // 2
+    offset_z = (max_grid_bz + 1) // 2
+    min_bx -= offset_x
+    max_bx -= offset_x
+    min_by -= offset_y
+    max_by -= offset_y
+    min_bz -= offset_z
+    max_bz -= offset_z
+
+    count_x = max_bx - min_bx + 1
+    count_y = max_by - min_by + 1
+    count_z = max_bz - min_bz + 1
+    if count_x <= 0 or count_y <= 0 or count_z <= 0:
+        return 0, 0, 0, 0, 0, 0, grid_W, grid_H, grid_D
+
+    return (
+        min_bx,
+        min_by,
+        min_bz,
+        count_x,
+        count_y,
+        count_z,
+        grid_W,
+        grid_H,
+        grid_D,
+    )
+
+
+def _reference_cleared_pools(tsdf, bounds_min: torch.Tensor, bounds_max: torch.Tensor) -> set[int]:
+    """Pools of the allocated blocks each box intersects, from the stored block keys.
+
+    Independent of the hash table and of the collect kernel: a block is cleared when its
+    key lies in the block range the frozen single-box conversion gives the box.
+    """
+    data = tsdf.data
+    n_alloc = int(data.num_allocated.item())
+    keys = data.block_coords[: n_alloc * 3].view(n_alloc, 3).long().cpu()
+    allocated = data.block_to_hash_slot[:n_alloc].cpu() >= 0
+    pools = set()
+    for i in range(bounds_min.shape[0]):
+        bx, by, bz, cx, cy, cz, *_ = _reference_aabb_to_block_bounds(
+            tsdf, bounds_min[i], bounds_max[i]
+        )
+        if cx <= 0 or cy <= 0 or cz <= 0:
+            continue
+        lo = torch.tensor([bx, by, bz])
+        hi = lo + torch.tensor([cx, cy, cz])
+        inside = ((keys >= lo) & (keys < hi)).all(dim=1) & allocated
+        pools.update(torch.nonzero(inside).flatten().tolist())
+    return pools
+
+
+def _clear_test_boxes(device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sphere-like boxes: inside the map, overlapping, straddling and outside the grid,
+    corner-swapped, and boxes whose faces sit exactly on block boundaries."""
+    gen = torch.Generator(device="cpu").manual_seed(7)
+    n = 300
+    centers = torch.rand((n, 3), generator=gen) * torch.tensor([1.4, 1.2, 1.2]) - torch.tensor(
+        [0.7, 0.6, 0.6 - PLANE_Z]
+    )
+    radii = torch.rand((n, 1), generator=gen) * 0.08 + 0.005
+    bounds_min = centers - radii
+    bounds_max = centers + radii
+    # corner-swapped boxes must be handled like their sorted version
+    bounds_min[::7], bounds_max[::7] = bounds_max[::7].clone(), bounds_min[::7].clone()
+    # faces exactly on block boundaries (block edge = block_size * voxel_size = 0.04 m)
+    edge = 2 * VOXEL_SIZE
+    k = torch.arange(10, dtype=torch.float32)
+    aligned_min = torch.stack([k * edge - 0.2, k * 0.0 - 0.1, k * 0.0 + PLANE_Z - 0.1], dim=1)
+    aligned_max = aligned_min + edge
+    bounds_min = torch.cat([bounds_min, aligned_min])
+    bounds_max = torch.cat([bounds_max, aligned_max])
+    return bounds_min.to(device), bounds_max.to(device)
+
+
+def test_clear_regions_block_bounds_match_reference(warp_init, device):
+    """The on-device box -> block conversion matches the frozen host conversion exactly."""
+    mapper = _bumpy_scene_mapper(device)
+    tsdf = mapper.tsdf
+    camera = mapper._integrator._tsdf_integrator._camera_integrator
+    bounds_min, bounds_max = _clear_test_boxes(device)
+
+    min_block, block_count = camera._world_aabbs_to_block_bounds(tsdf, bounds_min, bounds_max)
+    n_non_empty = 0
+    for i in range(bounds_min.shape[0]):
+        ref = _reference_aabb_to_block_bounds(tsdf, bounds_min[i], bounds_max[i])
+        batched_count = block_count[i].tolist()
+        if ref[3] <= 0 or ref[4] <= 0 or ref[5] <= 0:
+            assert min(batched_count) <= 0, i
+            continue
+        n_non_empty += 1
+        assert min_block[i].tolist() == list(ref[0:3]), i
+        assert batched_count == list(ref[3:6]), i
+    assert n_non_empty > 100
+
+
+def test_clear_regions_matches_reference_bitwise(warp_init, device):
+    """clear_regions leaves the map bit-identical to clearing the reference block set."""
+    mapper = _bumpy_scene_mapper(device)
+    camera = mapper._integrator._tsdf_integrator._camera_integrator
+    bounds_min, bounds_max = _clear_test_boxes(device)
+    before = _tsdf_tensors(mapper)
+
+    expected_pools = _reference_cleared_pools(mapper.tsdf, bounds_min, bounds_max)
+    camera.clear_blocks(
+        mapper.tsdf, torch.tensor(sorted(expected_pools), dtype=torch.int32, device=device)
+    )
+    mapper._integrator._site_index.fill_(-1)
+    mapper._integrator._dist_field.zero_()
+    expected_tsdf = _tsdf_tensors(mapper)
+    expected_esdf = mapper.compute_esdf().feature_tensor.clone()
+
+    _restore_tsdf_tensors(mapper, before)
+    n_cleared = mapper.clear_regions(bounds_min, bounds_max)
+    actual_tsdf = _tsdf_tensors(mapper)
+    actual_esdf = mapper.compute_esdf().feature_tensor.clone()
+
+    assert len(expected_pools) > 0
+    assert n_cleared == len(expected_pools)
+    assert set(camera.clear_pool_indices[:n_cleared].tolist()) == expected_pools
+    for name, value in expected_tsdf.items():
+        assert torch.equal(actual_tsdf[name], value), name
+    assert torch.equal(actual_esdf, expected_esdf)
+    # the reference really cleared something, so the comparison is not vacuous
+    assert not torch.equal(before["block_data"], expected_tsdf["block_data"])
+
+
+def test_clear_regions_repeated_calls_stay_exact(warp_init, device):
+    """The dedup marks of one call never hide blocks from the next call."""
+    mapper = _bumpy_scene_mapper(device)
+    bounds_min, bounds_max = _clear_test_boxes(device)
+    before = _tsdf_tensors(mapper)
+    half = bounds_min.shape[0] // 2
+
+    mapper.clear_regions(bounds_min, bounds_max)
+    expected = _tsdf_tensors(mapper)
+
+    _restore_tsdf_tensors(mapper, before)
+    mapper.clear_regions(bounds_min[:half], bounds_max[:half])
+    mapper.clear_regions(bounds_min[half:], bounds_max[half:])
+    mapper.clear_regions(bounds_min, bounds_max)
+    actual = _tsdf_tensors(mapper)
+    for name, value in expected.items():
+        assert torch.equal(actual[name], value), name
+
+
+def test_clear_region_alias_matches_clear_regions(warp_init, device):
+    """The deprecated single-box clear_region clears exactly what clear_regions does."""
+    mapper = _bumpy_scene_mapper(device)
+    bounds_min, bounds_max = _clear_test_boxes(device)
+    before = _tsdf_tensors(mapper)
+    for i in range(bounds_min.shape[0]):
+        mapper.clear_regions(bounds_min[i], bounds_max[i])
+    expected = _tsdf_tensors(mapper)
+
+    _restore_tsdf_tensors(mapper, before)
+    for i in range(bounds_min.shape[0]):
+        mapper.clear_region(bounds_min[i], bounds_max[i])
+    actual = _tsdf_tensors(mapper)
+    for name, value in expected.items():
+        assert torch.equal(actual[name], value), name
+
+
+def test_clear_regions_empty_and_invalid_input(warp_init, device):
+    mapper = _bumpy_scene_mapper(device)
+    empty = torch.zeros((0, 3), dtype=torch.float32, device=device)
+    assert mapper.clear_regions(empty, empty) == 0
+
+    far = torch.tensor([[50.0, 50.0, 50.0]], dtype=torch.float32, device=device)
+    assert mapper.clear_regions(far, far + 0.1) == 0
+
+    bad = torch.tensor([[float("nan"), 0.0, 1.0]], dtype=torch.float32, device=device)
+    with pytest.raises(Exception):
+        mapper.clear_regions(bad, bad + 0.1)

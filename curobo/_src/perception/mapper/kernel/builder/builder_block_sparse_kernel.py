@@ -154,7 +154,7 @@ class BlockSparseKernels:
     compute_block_keys_only_kernel: WarpKernel
     allocate_visible_blocks_from_keys_kernel: WarpKernel
     build_support_pixels_from_keys_kernel: WarpKernel
-    collect_blocks_in_aabb_kernel: WarpKernel
+    collect_blocks_in_aabbs_kernel: WarpKernel
     clear_blocks_by_pool_kernel: WarpKernel
     clear_block_features_by_pool_kernel: WarpKernel
     clear_block_grid_rgb_by_pool_kernel: WarpKernel

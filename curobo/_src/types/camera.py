@@ -9,7 +9,6 @@ from typing import List, Optional
 
 # Third Party
 import torch
-from torch.profiler import record_function
 
 # CuRobo
 from curobo._src.geom.cv import (
@@ -19,6 +18,7 @@ from curobo._src.geom.cv import (
 )
 from curobo._src.types.pose import Pose
 from curobo._src.util.logging import log_and_raise
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 @dataclass
@@ -65,7 +65,7 @@ class CameraObservation:
             log_and_raise("rgb_image is None, cannot get shape")
         return self.rgb_image.shape
 
-    @record_function("camera/copy_")
+    @record_function_if_profiling("camera/copy_")
     def copy_(self, new_data: CameraObservation):
         if self.rgb_image is not None:
             self.rgb_image.copy_(new_data.rgb_image)
@@ -86,7 +86,7 @@ class CameraObservation:
         self.depth_to_meter = new_data.depth_to_meter
         self.resolution = new_data.resolution
 
-    @record_function("camera/clone")
+    @record_function_if_profiling("camera/clone")
     def clone(self):
         return CameraObservation(
             depth_image=self.depth_image.clone() if self.depth_image is not None else None,

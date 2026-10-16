@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Optional, Union
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 # CuRobo
 from curobo._src.robot.kinematics.kinematics import Kinematics
@@ -30,6 +29,7 @@ from curobo._src.util.cuda_stream_util import (
 from curobo._src.curobolib.cuda_ops.tensor_checks import check_float16_tensors, check_float32_tensors
 from curobo._src.util.logging import log_and_raise, log_info
 from curobo._src.util.state_filter import JointStateFilter
+from curobo._src.util.torch_util import record_function_if_profiling
 
 if TYPE_CHECKING:
     # CuRobo
@@ -351,7 +351,7 @@ class RobotStateTransition:
         if state_seq.jerk is not None:
             tensors_to_check["jerk"] = state_seq.jerk
         check_fn(state_seq.position.device, **tensors_to_check)
-        with profiler.record_function("tensor_step"):
+        with record_function_if_profiling("tensor_step"):
             # forward step with step matrix:
             state_seq = self.tensor_step(
                 start_state_shaped,
@@ -711,7 +711,7 @@ class RobotStateTransition:
                 "Cannot update link inertial properties without inverse dynamics (robot_config.dynamics is None)"
             )
 
-    @profiler.record_function("RobotStateTransition/get_full_dof_from_solution")
+    @record_function_if_profiling("RobotStateTransition/get_full_dof_from_solution")
     def get_full_dof_from_solution(self, q_js: JointState) -> JointState:
         """This function will all the dof that are locked during optimization.
 

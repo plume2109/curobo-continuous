@@ -8,12 +8,12 @@ from typing import List, Optional, Tuple, Union
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 # CuRobo
 from curobo._src.state.state_robot import RobotState
 from curobo._src.util.logging import log_and_raise
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 @dataclass
@@ -327,7 +327,7 @@ class GraphNodeManager:
         return self._used_node_count
 
     @staticmethod
-    @profiler.record_function("base_graph_planner/jit_add_new_nodes")
+    @record_function_if_profiling("base_graph_planner/jit_add_new_nodes")
     @get_torch_jit_decorator(dynamic=True, slow_to_compile=True)
     def _jit_add_new_nodes(
         unique_nodes,

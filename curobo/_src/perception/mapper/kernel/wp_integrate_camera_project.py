@@ -125,6 +125,10 @@ class CameraProjectIntegrator:
             device=device,
         )
         self.clear_count = torch.zeros(1, dtype=torch.int32, device=device)
+        # clear_regions dedup: a block is already collected when its mark equals the current
+        # generation, so the buffer never needs clearing between calls.
+        self.clear_mark = torch.zeros(max_blocks, dtype=torch.int32, device=device)
+        self._clear_generation = 0
         self.visible_count = torch.zeros(1, dtype=torch.int32, device=device)
         self.visible_epoch = torch.zeros(max_blocks, dtype=torch.int32, device=device)
         self.pool_to_visible_slot = torch.empty(max_blocks, dtype=torch.int32, device=device)
@@ -298,112 +302,6 @@ class CameraProjectIntegrator:
             )
             self._timer_stop("clear_new_block_features_kernel")
 
-    def _world_aabb_to_block_bounds(self, tsdf, bounds_min, bounds_max) -> tuple:
-        """Convert a world-space AABB to conservative inclusive block bounds."""
-        lo_in = (
-            torch.as_tensor(
-                bounds_min,
-                dtype=torch.float32,
-            )
-            .flatten()
-            .detach()
-            .cpu()
-        )
-        hi_in = (
-            torch.as_tensor(
-                bounds_max,
-                dtype=torch.float32,
-            )
-            .flatten()
-            .detach()
-            .cpu()
-        )
-        if lo_in.numel() != 3 or hi_in.numel() != 3:
-            log_and_raise(
-                "clear_region bounds must each contain 3 values, got "
-                f"bounds_min={tuple(lo_in.shape)}, bounds_max={tuple(hi_in.shape)}."
-            )
-
-        lo = torch.minimum(lo_in, hi_in)
-        hi = torch.maximum(lo_in, hi_in)
-        if not torch.isfinite(lo).all() or not torch.isfinite(hi).all():
-            log_and_raise("clear_region bounds must be finite.")
-
-        origin = tsdf.data.origin.detach().to(device="cpu", dtype=torch.float32).flatten()
-        voxel_size = float(tsdf.config.voxel_size)
-        block_size = int(tsdf.block_size)
-
-        grid_D, grid_H, grid_W = (int(v) for v in tsdf.config.grid_shape)
-
-        center_offset = (
-            torch.tensor(
-                [grid_W, grid_H, grid_D],
-                dtype=torch.float32,
-            )
-            * 0.5
-        )
-        v_lo = (lo - origin) / voxel_size + center_offset
-        v_hi = (hi - origin) / voxel_size + center_offset
-
-        # Include blocks touching exact AABB boundaries. This can over-clear
-        # one adjacent block on boundary-aligned regions, but avoids misses.
-        eps_voxels = 1.0e-6
-        min_bx = math.floor((float(v_lo[0]) - eps_voxels) / block_size)
-        min_by = math.floor((float(v_lo[1]) - eps_voxels) / block_size)
-        min_bz = math.floor((float(v_lo[2]) - eps_voxels) / block_size)
-        max_bx = math.floor((float(v_hi[0]) + eps_voxels) / block_size)
-        max_by = math.floor((float(v_hi[1]) + eps_voxels) / block_size)
-        max_bz = math.floor((float(v_hi[2]) + eps_voxels) / block_size)
-
-        max_grid_bx = math.ceil(grid_W / block_size) - 1
-        max_grid_by = math.ceil(grid_H / block_size) - 1
-        max_grid_bz = math.ceil(grid_D / block_size) - 1
-        if max_grid_bx < 0 or max_grid_by < 0 or max_grid_bz < 0:
-            return 0, 0, 0, 0, 0, 0, grid_W, grid_H, grid_D
-        if (
-            max_bx < 0
-            or max_by < 0
-            or max_bz < 0
-            or min_bx > max_grid_bx
-            or min_by > max_grid_by
-            or min_bz > max_grid_bz
-        ):
-            return 0, 0, 0, 0, 0, 0, grid_W, grid_H, grid_D
-        min_bx = max(min_bx, 0)
-        min_by = max(min_by, 0)
-        min_bz = max(min_bz, 0)
-        max_bx = min(max_bx, max_grid_bx)
-        max_by = min(max_by, max_grid_by)
-        max_bz = min(max_bz, max_grid_bz)
-
-        offset_x = (max_grid_bx + 1) // 2
-        offset_y = (max_grid_by + 1) // 2
-        offset_z = (max_grid_bz + 1) // 2
-        min_bx -= offset_x
-        max_bx -= offset_x
-        min_by -= offset_y
-        max_by -= offset_y
-        min_bz -= offset_z
-        max_bz -= offset_z
-
-        count_x = max_bx - min_bx + 1
-        count_y = max_by - min_by + 1
-        count_z = max_bz - min_bz + 1
-        if count_x <= 0 or count_y <= 0 or count_z <= 0:
-            return 0, 0, 0, 0, 0, 0, grid_W, grid_H, grid_D
-
-        return (
-            min_bx,
-            min_by,
-            min_bz,
-            count_x,
-            count_y,
-            count_z,
-            grid_W,
-            grid_H,
-            grid_D,
-        )
-
     def clear_blocks(self, tsdf, pool_indices) -> int:
         """Clear dynamic block contents for an explicit pool-index list."""
         if not tsdf.data.has_dynamic and not tsdf.data.has_features:
@@ -482,52 +380,129 @@ class CameraProjectIntegrator:
 
         return n_clear
 
-    def clear_region(self, tsdf, bounds_min, bounds_max) -> int:
-        """Clear dynamic block contents for allocated blocks intersecting an AABB.
+    def _world_aabbs_to_block_bounds(
+        self, tsdf, bounds_min: torch.Tensor, bounds_max: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert N world-space AABBs to conservative inclusive block bounds, on device.
 
-        The AABB is specified in world coordinates. Blocks remain allocated in
-        the hash table; this only clears dynamic TSDF/RGB and feature
-        accumulators so subsequent integration can refill them in place.
+        The voxel coordinates are computed in float32 and the boundary epsilon and block
+        floor in float64, the precision of the former single-box host conversion, so a box
+        maps to exactly the blocks it used to.
+
+        Args:
+            bounds_min: World-space corners, shape ``(N, 3)``, on the map's device.
+            bounds_max: World-space opposite corners, shape ``(N, 3)``.
+
+        Returns:
+            ``(min_block, block_count)``, int32 tensors of shape ``(N, 3)``: first block key
+            and number of blocks per axis (x, y, z). A box that misses the grid has a
+            non-positive count on at least one axis.
         """
-        (
-            min_bx,
-            min_by,
-            min_bz,
-            count_x,
-            count_y,
-            count_z,
-            _grid_W_dim,
-            _grid_H_dim,
-            _grid_D,
-        ) = self._world_aabb_to_block_bounds(tsdf, bounds_min, bounds_max)
-        if count_x <= 0 or count_y <= 0 or count_z <= 0:
+        lo = torch.minimum(bounds_min, bounds_max)
+        hi = torch.maximum(bounds_min, bounds_max)
+
+        origin = tsdf.data.origin.detach().to(dtype=torch.float32).flatten()
+        voxel_size = float(tsdf.config.voxel_size)
+        block_size = int(tsdf.block_size)
+        grid_D, grid_H, grid_W = (int(v) for v in tsdf.config.grid_shape)
+        center_offset = (
+            torch.tensor([grid_W, grid_H, grid_D], dtype=torch.float32, device=lo.device) * 0.5
+        )
+        v_lo = (lo - origin) / voxel_size + center_offset
+        v_hi = (hi - origin) / voxel_size + center_offset
+
+        eps_voxels = 1.0e-6
+        min_b = torch.floor((v_lo.double() - eps_voxels) / block_size).long()
+        max_b = torch.floor((v_hi.double() + eps_voxels) / block_size).long()
+
+        max_grid_b = torch.tensor(
+            [
+                math.ceil(grid_W / block_size) - 1,
+                math.ceil(grid_H / block_size) - 1,
+                math.ceil(grid_D / block_size) - 1,
+            ],
+            dtype=torch.long,
+            device=lo.device,
+        )
+        # Clamping to [0, max_grid_b] leaves a non-positive count exactly when the
+        # single-box version returns an empty box (fully outside, or empty grid).
+        min_b = torch.maximum(min_b, torch.zeros_like(min_b))
+        max_b = torch.minimum(max_b, max_grid_b)
+        offset = (max_grid_b + 1) // 2
+        min_b = min_b - offset
+        max_b = max_b - offset
+        count = max_b - min_b + 1
+        return min_b.to(torch.int32), count.to(torch.int32)
+
+    def clear_regions(self, tsdf, bounds_min: torch.Tensor, bounds_max: torch.Tensor) -> int:
+        """Clear dynamic block contents for allocated blocks intersecting any of N AABBs.
+
+        Clears the union of the blocks each box intersects, with one collect launch and two
+        host syncs whatever N is. Blocks remain allocated in the hash table; only dynamic
+        TSDF/RGB and feature accumulators are cleared, so integration can refill them.
+
+        Args:
+            tsdf: Block-sparse TSDF to clear.
+            bounds_min: World-space corners, shape ``(N, 3)``.
+            bounds_max: World-space opposite corners, shape ``(N, 3)``.
+
+        Returns:
+            Number of distinct allocated blocks cleared (a block inside several boxes counts
+            once).
+        """
+        device = tsdf.data.hash_table.device
+        bounds_min = torch.as_tensor(bounds_min, dtype=torch.float32, device=device).reshape(-1, 3)
+        bounds_max = torch.as_tensor(bounds_max, dtype=torch.float32, device=device).reshape(-1, 3)
+        if bounds_min.shape != bounds_max.shape:
+            log_and_raise(
+                "clear_regions bounds must have the same (N, 3) shape, got "
+                f"bounds_min={tuple(bounds_min.shape)}, bounds_max={tuple(bounds_max.shape)}."
+            )
+        n_boxes = int(bounds_min.shape[0])
+        if n_boxes == 0:
             return 0
+        if not tsdf.data.has_dynamic and not tsdf.data.has_features:
+            return 0  # same as clear_blocks: nothing clearable
+
+        min_block, block_count = self._world_aabbs_to_block_bounds(tsdf, bounds_min, bounds_max)
+        # Host sync 1: validity and the launch extent, in one transfer.
+        finite = torch.isfinite(bounds_min).all() & torch.isfinite(bounds_max).all()
+        header = torch.cat([finite.view(1).to(torch.int32), block_count.amax(dim=0)]).tolist()
+        if not header[0]:
+            log_and_raise("clear_regions bounds must be finite.")
+        launch_x, launch_y, launch_z = header[1], header[2], header[3]
+        if launch_x <= 0 or launch_y <= 0 or launch_z <= 0:
+            return 0
+
+        self._clear_generation += 1
+        if self._clear_generation >= 2**31 - 1:
+            self.clear_mark.zero_()
+            self._clear_generation = 1
 
         kernels = tsdf.kernels
         data = tsdf.get_warp_data()
-        device, stream = get_warp_device_stream(tsdf.data.hash_table)
+        wp_device, stream = get_warp_device_stream(tsdf.data.hash_table)
         self.clear_count.zero_()
-
         wp.launch(
-            kernels.collect_blocks_in_aabb_kernel,
-            dim=(count_x, count_y, count_z),
+            kernels.collect_blocks_in_aabbs_kernel,
+            dim=(n_boxes, launch_x * launch_y * launch_z),
             inputs=[
                 data.hash_table,
                 tsdf.config.hash_capacity,
-                min_bx,
-                min_by,
-                min_bz,
-                count_x,
-                count_y,
-                count_z,
+                wp.from_torch(min_block.contiguous(), dtype=wp.vec3i),
+                wp.from_torch(block_count.contiguous(), dtype=wp.vec3i),
+                launch_x,
+                launch_y,
+                wp.from_torch(self.clear_mark),
+                self._clear_generation,
                 wp.from_torch(self.clear_pool_indices),
                 wp.from_torch(self.clear_count),
                 tsdf.config.max_blocks,
             ],
-            device=device,
+            device=wp_device,
             stream=stream,
         )
-
+        # Host sync 2: how many distinct blocks were found (dedup keeps it <= max_blocks).
         n_clear = min(int(self.clear_count.item()), tsdf.config.max_blocks)
         return self.clear_blocks(tsdf, self.clear_pool_indices[:n_clear])
 

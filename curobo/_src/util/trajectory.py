@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 # Third Party
 import numpy as np
 import torch
-import torch.autograd.profiler as profiler
 from scipy import interpolate
 
 # CuRobo
@@ -19,6 +18,7 @@ from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.util.logging import log_and_raise, log_warn
 from curobo._src.util.torch_util import get_torch_jit_decorator
 from curobo._src.util.warp_interpolation import get_cuda_linear_interpolation
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class TrajInterpolationType(Enum):
@@ -169,7 +169,7 @@ def get_cpu_linear_interpolation(
     return out_traj_state
 
 
-@profiler.record_function("interpolation/1D")
+@record_function_if_profiling("interpolation/1D")
 def linear_smooth(
     x: np.array,
     y=None,

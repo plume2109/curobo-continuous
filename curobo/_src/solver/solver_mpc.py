@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard Library
+import copy
 from typing import Dict, List, Optional, Tuple
 
 # Third Party
@@ -60,6 +61,12 @@ class MPCSolver:
         self._goal_tool_poses = None
         self._debug = False
         self._debug_counter = 0
+        # A goal written by update_goal_tool_poses(..., defer_rollout_update=True) that has not
+        # reached the rollouts yet: the next solve's update_current_state propagates it.
+        self._rollout_goal_pending = False
+        # _get_result only reads the metrics of the last solve: cached per metrics object.
+        self._result_cache_metrics = None
+        self._result_cache = None
 
         # Create IKSolver for computing IK solutions when updating goal poses
         ik_solver_cfg = IKSolverCfg.create(
@@ -285,6 +292,8 @@ class MPCSolver:
 
     def _update_rollout_params(self, goal_buffer, include_auxiliary_rollout=True):
         self.core.update_rollout_params(goal_buffer, include_auxiliary_rollout)
+        # the goal registry is one persistent buffer: any propagation carries the pending goal
+        self._rollout_goal_pending = False
 
     @property
     def problem_batch_size(self) -> int:
@@ -405,6 +414,7 @@ class MPCSolver:
         run_ik: bool = True,
         use_ik_goal: bool = True,
         use_best_effort_ik: bool = False,
+        defer_rollout_update: bool = False,
     ) -> bool:
         """Update the Cartesian goal poses for one or more robots.
 
@@ -429,6 +439,11 @@ class MPCSolver:
                 state and enable joint-position tracking.
             use_best_effort_ik: If ``True``, accept the IK result even when
                 not all problems converge; otherwise require full success.
+            defer_rollout_update: Only with ``run_ik=False``. Write the goal to the goal
+                registry but do not propagate it to the rollouts now: the next solve's
+                :func:`update_current_state` propagates the whole registry anyway. Saves one
+                full rollout update per call when every goal update is followed by a solve
+                (e.g. one goal per ``interpolation_steps`` ticks).
 
         Returns:
             ``True`` if the goal was successfully updated (including IK when
@@ -469,7 +484,10 @@ class MPCSolver:
             self.disable_joint_position_tracking()
             new_goal_buffer = self.goal_registry_manager.update_goal_tool_poses(goal_tool_poses)
             self._goal_tool_poses = goal_tool_poses
-            self._update_rollout_params(new_goal_buffer)
+            if defer_rollout_update:
+                self._rollout_goal_pending = True
+            else:
+                self._update_rollout_params(new_goal_buffer)
             return True
 
     def _solve_ik_for_goal(
@@ -601,7 +619,12 @@ class MPCSolver:
 
         next_command = self.trajectory_execution_manager.get_next_command()
         metrics = self.trajectory_execution_manager.get_current_metrics()
-        result = self._get_result(metrics)
+        # metrics only change at a solve: between two solves every tick reads the same
+        # object, so the result is computed once per solve and copied for the other ticks
+        if metrics is not self._result_cache_metrics or self._result_cache is None:
+            self._result_cache = self._get_result(metrics)
+            self._result_cache_metrics = metrics
+        result = copy.copy(self._result_cache)
 
         result.next_action = next_command
         result.solve_time = timer.stop()

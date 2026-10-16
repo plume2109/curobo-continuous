@@ -10,13 +10,13 @@ from typing import List, Optional
 # Third Party
 import numpy as np
 import torch
-import torch.autograd.profiler as profiler
 
 # CuRobo
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.util.logging import log_and_raise
 from curobo._src.util.sampling.sequencer_base import BaseSequencer
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class SampleBuffer:
@@ -140,7 +140,7 @@ class SampleBuffer:
             ).contiguous()
         return samples
 
-    @profiler.record_function("generator/samples")
+    @record_function_if_profiling("generator/samples")
     def get_samples(self, num_samples: int, bounded: bool = False) -> torch.Tensor:
         """Get uniform samples, optionally bounded to specified range.
 
@@ -156,7 +156,7 @@ class SampleBuffer:
             samples = self.bound_samples(samples, self.range_b, self.low_bounds)
         return samples
 
-    @profiler.record_function("generator/gaussian_samples")
+    @record_function_if_profiling("generator/gaussian_samples")
     def get_gaussian_samples(self, num_samples: int, variance: float = 1.0) -> torch.Tensor:
         """Get Gaussian-distributed samples.
 
