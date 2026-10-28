@@ -320,7 +320,7 @@ class LBFGSOpt:
         n_linesearch = context.n_linesearch
 
         if rebuild_search_points:
-            with profiler.record_function("lbfgs/search_points"):
+            with record_function_if_profiling("lbfgs/search_points"):
                 torch.addcmul(
                     iteration_state.exploration_action.detach().unsqueeze(1),
                     context.line_search_scale,
@@ -332,7 +332,7 @@ class LBFGSOpt:
 
         search_cost, search_gradient = context.compute_costs_and_gradients(self._search_action)
 
-        with profiler.record_function("lbfgs/line_search_step"):
+        with record_function_if_profiling("lbfgs/line_search_step"):
             line_search_type = LineSearchType(core.config.line_search_type)
             wolfe_line_search_lbfgs_step(
                 iteration_state,
