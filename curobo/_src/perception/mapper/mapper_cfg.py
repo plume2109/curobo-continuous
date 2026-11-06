@@ -62,6 +62,10 @@ class MapperCfg:
         depth_maximum_distance: Maximum valid depth in meters.
         decay_factor: Weight decay applied to ALL voxels each frame (1.0 = no decay).
         frustum_decay_factor: Additional decay for in-view voxels.
+        frustum_decay_depth_margin: If set, frustum decay only applies to blocks
+            the camera sees through: the measured depth must lie beyond the
+            block plus this margin [m]. Geometry hidden behind a nearer
+            surface is then kept. None (default) decays every in-view block.
         block_size: Voxels per block edge. Supported values are 1 or
             powers of 2 in [2, 32]
             (default 8). Specializes the Warp kernel builder; two
@@ -88,6 +92,7 @@ class MapperCfg:
     # === Decay ===
     decay_factor: float = 1.0
     frustum_decay_factor: float = 1.0
+    frustum_decay_depth_margin: Optional[float] = None
 
     # === Block Storage ===
     #: Voxels per block edge. Supported values are 1 or powers of 2 in [2, 32]. See
@@ -214,6 +219,16 @@ class MapperCfg:
     #: ``~W_max / mean_per_frame_weight``). Raise for longer memory,
     #: lower for faster adaptation to dynamic scenes.
     accumulator_w_max: float = 1000.0
+    #: Upper bound on each voxel's TSDF weight. When an integration step
+    #: pushes a voxel's weight above it, the weighted SDF sum and the weight
+    #: are scaled down together, keeping the SDF and giving EMA semantics.
+    #: The default (fp16 max) only prevents overflow to ``inf``, which would
+    #: freeze the voxel as a surface that no decay can remove.
+    tsdf_weight_max: float = 65504.0
+    #: Weight each observation of a voxel by the pixel area it covers
+    #: (``(f * voxel / z)^2``). False counts every observation as 1, so the
+    #: weight is a frame count and decay times do not depend on distance.
+    tsdf_coverage_weighting: bool = True
 
     # === Device ===
     device: str = "cuda:0"
@@ -244,6 +259,10 @@ class MapperCfg:
             raise ValueError(f"decay_factor must be in (0, 1]: {self.decay_factor}")
         if not (0.0 <= self.frustum_decay_factor <= 1.0):
             raise ValueError(f"frustum_decay_factor must be in (0, 1]: {self.frustum_decay_factor}")
+        if self.frustum_decay_depth_margin is not None and self.frustum_decay_depth_margin < 0.0:
+            raise ValueError(
+                f"frustum_decay_depth_margin must be >= 0: {self.frustum_decay_depth_margin}"
+            )
 
         # Validate hash_load_factor
         if not (0.0 < self.hash_load_factor <= 1.0):

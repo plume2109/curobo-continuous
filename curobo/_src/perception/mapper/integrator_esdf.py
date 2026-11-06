@@ -110,6 +110,8 @@ class BlockSparseESDFIntegratorCfg:
         depth_minimum_distance: Minimum valid depth in meters.
         depth_maximum_distance: Maximum valid depth in meters.
         frustum_decay: Decay for in-view voxels (0.5=quick adapt, 1.0=no extra decay).
+        frustum_decay_depth_margin: If set, frustum decay only hits blocks the
+            camera sees through (depth beyond block + margin [m]).
         time_decay: Decay for all voxels (1.0=persist, 0.99=slow fade).
         minimum_tsdf_weight: Minimum weight to consider a voxel as observed.
             Since weight = 1/depth² (clamped to [0.001, 2.0]), this can be interpreted
@@ -144,6 +146,7 @@ class BlockSparseESDFIntegratorCfg:
     depth_minimum_distance: float = 0.1
     depth_maximum_distance: float = 5.0
     frustum_decay: float = 0.5
+    frustum_decay_depth_margin: Optional[float] = None
     time_decay: float = 1.0
     minimum_tsdf_weight: float = 0.1
     blend_esdf: bool = False
@@ -214,6 +217,10 @@ class BlockSparseESDFIntegratorCfg:
     profile_integration_kernel_timings: bool = False
     #: Per-block accumulator weight cap (see BlockSparseTSDFIntegratorCfg).
     accumulator_w_max: float = 1000.0
+    #: TSDF voxel weight cap (see BlockSparseTSDFIntegratorCfg).
+    tsdf_weight_max: float = 65504.0
+    #: Weight observations by pixel coverage (see BlockSparseTSDFIntegratorCfg).
+    tsdf_coverage_weighting: bool = True
 
     def __post_init__(self):
         if self.origin is None:
@@ -413,6 +420,7 @@ class BlockSparseESDFIntegrator:
             depth_minimum_distance=config.depth_minimum_distance,
             depth_maximum_distance=config.depth_maximum_distance,
             frustum_decay=config.frustum_decay,
+            frustum_decay_depth_margin=config.frustum_decay_depth_margin,
             time_decay=config.time_decay,
             minimum_tsdf_weight=config.minimum_tsdf_weight,
             grid_shape=config.grid_shape,
@@ -454,6 +462,8 @@ class BlockSparseESDFIntegrator:
             feature_integration_kernel=config.feature_integration_kernel,
             profile_integration_kernel_timings=config.profile_integration_kernel_timings,
             accumulator_w_max=config.accumulator_w_max,
+            tsdf_weight_max=config.tsdf_weight_max,
+            tsdf_coverage_weighting=config.tsdf_coverage_weighting,
         )
         self._tsdf_integrator = BlockSparseTSDFIntegrator(
             tsdf_integrator_config,

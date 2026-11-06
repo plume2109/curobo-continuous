@@ -122,6 +122,7 @@ class Mapper:
             depth_minimum_distance=config.depth_minimum_distance,
             depth_maximum_distance=config.depth_maximum_distance,
             frustum_decay=config.frustum_decay_factor,
+            frustum_decay_depth_margin=config.frustum_decay_depth_margin,
             time_decay=config.decay_factor,
             minimum_tsdf_weight=config.minimum_tsdf_weight,
             grid_shape=config.grid_shape,
@@ -164,6 +165,8 @@ class Mapper:
             feature_integration_kernel=config.feature_integration_kernel,
             profile_integration_kernel_timings=config.profile_integration_kernel_timings,
             accumulator_w_max=config.accumulator_w_max,
+            tsdf_weight_max=config.tsdf_weight_max,
+            tsdf_coverage_weighting=config.tsdf_coverage_weighting,
             color_grid_size=config.color_grid_size,
         )
 

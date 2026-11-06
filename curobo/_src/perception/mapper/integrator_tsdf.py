@@ -104,6 +104,9 @@ class BlockSparseTSDFIntegratorCfg:
         depth_minimum_distance: Minimum valid depth in meters.
         depth_maximum_distance: Maximum valid depth in meters.
         frustum_decay: Decay for in-view voxels (0.5=quick adapt, 1.0=no extra decay).
+        frustum_decay_depth_margin: If set, frustum decay only hits blocks the
+            camera sees through (depth beyond block + margin [m]); occluded
+            geometry is kept. None decays every in-view block.
         time_decay: Decay for all voxels (1.0=persist, 0.99=slow fade).
         minimum_tsdf_weight: Minimum weight to consider a voxel as observed.
             Since weight = 1/depth² (clamped to [0.001, 2.0]), this can be interpreted
@@ -127,6 +130,7 @@ class BlockSparseTSDFIntegratorCfg:
     depth_minimum_distance: float = 0.1
     depth_maximum_distance: float = 5.0
     frustum_decay: float = 1.0  # 1.0 = no extra decay for in-view voxels
+    frustum_decay_depth_margin: Optional[float] = None  # None = decay all in-view blocks
     time_decay: float = 1.0  # 1.0 = no time decay
     minimum_tsdf_weight: float = 0.1
     grid_shape: Tuple[int, int, int] = None
@@ -197,6 +201,16 @@ class BlockSparseTSDFIntegratorCfg:
     #: ``W_max / mean_per_frame_weight`` for old observations. See
     #: :attr:`BlockSparseTSDFCfg.accumulator_w_max`.
     accumulator_w_max: float = 10000.0
+    #: Upper bound on each voxel's TSDF weight. When an integration step
+    #: pushes a voxel's weight above it, the weighted SDF sum and the weight
+    #: are scaled down together, keeping the SDF and giving EMA semantics.
+    #: The default (fp16 max) only prevents overflow to ``inf``, which would
+    #: freeze the voxel as a surface that no decay can remove.
+    tsdf_weight_max: float = 65504.0
+    #: Weight each observation of a voxel by the pixel area it covers
+    #: (``(f * voxel / z)^2``). False counts every observation as 1, so the
+    #: weight is a frame count and decay times do not depend on distance.
+    tsdf_coverage_weighting: bool = True
 
     def __post_init__(self):
         if self.origin is None:
@@ -418,6 +432,8 @@ class BlockSparseTSDFIntegrator:
             max_support_pixels_per_block_camera=config.max_support_pixels_per_block_camera,
             color_grid_size=config.color_grid_size,
             accumulator_w_max=config.accumulator_w_max,
+            tsdf_weight_max=config.tsdf_weight_max,
+            tsdf_coverage_weighting=config.tsdf_coverage_weighting,
         )
         if kernels is None:
             kernels = make_block_sparse_kernels(config)
@@ -694,6 +710,7 @@ class BlockSparseTSDFIntegrator:
         camera_positions = None
         camera_quaternions = None
         camera_img_shape = None
+        camera_depth_images = None
         if camera_observation is not None:
             depth_images = camera_observation.depth_image
             if depth_images.ndim != 3:
@@ -711,6 +728,7 @@ class BlockSparseTSDFIntegrator:
             camera_positions = camera_observation.pose.position.view(n_cameras, 3)
             camera_quaternions = camera_observation.pose.quaternion.view(n_cameras, 4)
             camera_img_shape = (int(depth_images.shape[1]), int(depth_images.shape[2]))
+            camera_depth_images = depth_images
 
         lidar_positions = None
         lidar_quaternions = None
@@ -735,6 +753,8 @@ class BlockSparseTSDFIntegrator:
             camera_img_shape=camera_img_shape,
             camera_depth_minimum_distance=self.config.depth_minimum_distance,
             camera_depth_maximum_distance=self.config.depth_maximum_distance,
+            camera_depth_images=camera_depth_images,
+            camera_depth_test_margin=self.config.frustum_decay_depth_margin,
             lidar_positions=lidar_positions,
             lidar_quaternions=lidar_quaternions,
             lidar_valid_range_m=lidar_valid_range_m,

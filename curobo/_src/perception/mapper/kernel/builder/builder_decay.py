@@ -117,12 +117,23 @@ def make_decay_kernels(
         block_in_frustum: wp.array(dtype=wp.int32),
         max_blocks: wp.int32,
         origin: wp.array(dtype=wp.vec3),
+        depth_images: wp.array3d(dtype=wp.float32),
+        depth_test: wp.int32,
+        depth_margin: wp.float32,
     ):
         """Mark blocks visible in ANY camera's frustum.
 
         Parallelized across (block, camera) pairs. Multiple threads
         may write ``1`` to the same ``block_in_frustum[block_idx]``;
         the write is idempotent so no atomics are needed.
+
+        With ``depth_test != 0`` a block is only marked when the camera
+        sees through it: every pixel with valid depth in a 3x3 grid
+        spanning the block's projected bounding sphere (clamped into the
+        image) must hold a depth beyond the sphere's far side plus
+        ``depth_margin`` [m], and at least one such pixel must exist.
+        Blocks hidden behind a nearer surface are left unmarked, so
+        occluded geometry is not decayed.
 
         Launch with ``dim = (max_blocks, n_cameras)``. The flags
         array must be zeroed before launch.
@@ -187,7 +198,8 @@ def make_decay_kernels(
             return
 
         if z_cam < 0.01:
-            block_in_frustum[block_idx] = 1
+            if depth_test == wp.int32(0):
+                block_in_frustum[block_idx] = 1
             return
 
         fx = intrinsics[cam_i, 0, 0]
@@ -209,6 +221,29 @@ def make_decay_kernels(
             return
         if v - pixel_radius_y > wp.float32(IMAGE_HEIGHT):
             return
+
+        if depth_test != wp.int32(0):
+            # Depth must lie beyond the whole block (far side of its
+            # bounding sphere) plus a margin at every sampled pixel that
+            # has valid depth. Samples are clamped into the image, because
+            # a block close to the camera projects far past its border.
+            # Pixels without valid depth are no evidence either way; at
+            # least one valid sample is needed.
+            required_depth = z_cam + sphere_radius + depth_margin
+            valid_samples = wp.int32(0)
+            for i in range(3):
+                for j in range(3):
+                    pu = wp.int32(wp.floor(u + pixel_radius_x * wp.float32(i - 1)))
+                    pv = wp.int32(wp.floor(v + pixel_radius_y * wp.float32(j - 1)))
+                    pu = wp.clamp(pu, wp.int32(0), IMAGE_WIDTH - wp.int32(1))
+                    pv = wp.clamp(pv, wp.int32(0), IMAGE_HEIGHT - wp.int32(1))
+                    d = depth_images[cam_i, pv, pu]
+                    if d >= depth_minimum_distance and d <= depth_maximum_distance:
+                        if d < required_depth:
+                            return
+                        valid_samples += wp.int32(1)
+            if valid_samples == wp.int32(0):
+                return
 
         block_in_frustum[block_idx] = 1
 
