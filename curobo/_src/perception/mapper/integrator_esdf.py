@@ -400,7 +400,8 @@ class BlockSparseESDFIntegrator:
         self._esdf_voxel_size = torch.tensor(
             [config.esdf_voxel_size], device=self.device, dtype=torch.float32
         )
-        self._origin = config.origin.to(device=self.device, dtype=torch.float32)
+        # Owned copy: set_origin() updates it in place and must not write to config.origin.
+        self._origin = config.origin.to(device=self.device, dtype=torch.float32).clone()
 
         # --- Create Block-Sparse TSDF Integrator (handles decay internally) ---
         tsdf_integrator_config = BlockSparseTSDFIntegratorCfg(
@@ -591,6 +592,20 @@ class BlockSparseESDFIntegrator:
         self._last_esdf_origin.copy_(self._origin)
         self._frame_count = 0
 
+    def set_origin(self, origin: torch.Tensor) -> None:
+        """Move the TSDF and ESDF grid center and reset the map.
+
+        Every origin buffer is updated in place, so the compiled kernels and
+        the captured ESDF CUDA graph are reused. Call OUTSIDE of CUDA graph.
+
+        Args:
+            origin: New grid center in world coordinates, shape ``(3,)`` [m].
+        """
+        origin = torch.as_tensor(origin, dtype=torch.float32).reshape(3)
+        self._tsdf_integrator.set_origin(origin)
+        self._origin.copy_(origin)
+        self.reset()
+
     def import_blocks(self, blocks: Dict[str, torch.Tensor]) -> int:
         """Import compact TSDF blocks and clear derived ESDF buffers.
 
@@ -627,13 +642,14 @@ class BlockSparseESDFIntegrator:
         )
         self._frame_count += 1
 
-    def clear_region(self, bounds_min, bounds_max) -> int:
-        """Clear dynamic TSDF contents for blocks intersecting a world AABB.
+    def clear_regions(self, bounds_min: torch.Tensor, bounds_max: torch.Tensor) -> int:
+        """Clear dynamic TSDF contents for blocks intersecting any of N world AABBs.
 
-        Cached ESDF buffers are invalidated because the TSDF source data has
-        changed. Call :meth:`compute_esdf` again before using the ESDF.
+        ``bounds_*`` have shape ``(N, 3)`` (or ``(3,)`` for one box). Cached ESDF buffers are
+        invalidated when anything was cleared; call :meth:`compute_esdf` again before using
+        the ESDF.
         """
-        n_clear = self._tsdf_integrator.clear_region(bounds_min, bounds_max)
+        n_clear = self._tsdf_integrator.clear_regions(bounds_min, bounds_max)
         if n_clear > 0:
             self._site_index.fill_(-1)
             self._dist_field.zero_()

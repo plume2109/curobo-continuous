@@ -187,3 +187,50 @@ def profile_class_methods(cls):
 
 def empty_decorator(function):
     return function
+
+
+_profiler_enabled = torch._C._autograd._profiler_enabled
+
+
+class record_function_if_profiling:
+    """:func:`torch.autograd.profiler.record_function` that costs nothing without a profiler.
+
+    ``record_function`` runs on every call even when no profiler is active (~6.5 us per
+    call, dominated by op dispatch). This checks whether a profiler (``torch.profiler``,
+    ``emit_nvtx``) is running first (~0.1 us) and only then opens the range, so traces are
+    unchanged. Under ``torch.compile`` tracing it always defers to ``record_function``.
+    Usable as a decorator or a context manager, like ``record_function``.
+
+    Args:
+        name: Label of the profiler range.
+    """
+
+    __slots__ = ("name", "_range")
+
+    def __init__(self, name: str):
+        self.name = name
+        self._range = None
+
+    def __call__(self, function):
+        name = self.name
+
+        @wraps(function)
+        def wrapper(*args, **kwargs):
+            if torch.compiler.is_compiling() or _profiler_enabled():
+                with profiler.record_function(name):
+                    return function(*args, **kwargs)
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    def __enter__(self):
+        if torch.compiler.is_compiling() or _profiler_enabled():
+            self._range = profiler.record_function(self.name)
+            self._range.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._range is None:
+            return False
+        profiler_range, self._range = self._range, None
+        return profiler_range.__exit__(exc_type, exc_value, traceback)

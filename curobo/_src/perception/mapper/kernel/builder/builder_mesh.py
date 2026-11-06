@@ -505,9 +505,10 @@ def make_mesh_kernels(
         center_offset_x = wp.float32(tsdf.grid_W) * 0.5
         center_offset_y = wp.float32(tsdf.grid_H) * 0.5
         center_offset_z = wp.float32(tsdf.grid_D) * 0.5
+        grid_origin = tsdf.origin[0]
 
         p0 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx) - center_offset_x,
                 wp.float32(gy) - center_offset_y,
@@ -516,7 +517,7 @@ def make_mesh_kernels(
             * tsdf.voxel_size
         )
         p1 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx + 1) - center_offset_x,
                 wp.float32(gy) - center_offset_y,
@@ -525,7 +526,7 @@ def make_mesh_kernels(
             * tsdf.voxel_size
         )
         p2 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx + 1) - center_offset_x,
                 wp.float32(gy + 1) - center_offset_y,
@@ -534,7 +535,7 @@ def make_mesh_kernels(
             * tsdf.voxel_size
         )
         p3 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx) - center_offset_x,
                 wp.float32(gy + 1) - center_offset_y,
@@ -543,7 +544,7 @@ def make_mesh_kernels(
             * tsdf.voxel_size
         )
         p4 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx) - center_offset_x,
                 wp.float32(gy) - center_offset_y,
@@ -552,7 +553,7 @@ def make_mesh_kernels(
             * tsdf.voxel_size
         )
         p5 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx + 1) - center_offset_x,
                 wp.float32(gy) - center_offset_y,
@@ -561,7 +562,7 @@ def make_mesh_kernels(
             * tsdf.voxel_size
         )
         p6 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx + 1) - center_offset_x,
                 wp.float32(gy + 1) - center_offset_y,
@@ -570,7 +571,7 @@ def make_mesh_kernels(
             * tsdf.voxel_size
         )
         p7 = (
-            tsdf.origin
+            grid_origin
             + wp.vec3(
                 wp.float32(gx) - center_offset_x,
                 wp.float32(gy + 1) - center_offset_y,
@@ -929,10 +930,11 @@ def make_mesh_kernels(
         center_offset_x = wp.float32(tsdf.grid_W) * 0.5
         center_offset_y = wp.float32(tsdf.grid_H) * 0.5
         center_offset_z = wp.float32(tsdf.grid_D) * 0.5
+        grid_origin = tsdf.origin[0]
 
-        vx = (pos[0] - tsdf.origin[0]) / tsdf.voxel_size + center_offset_x
-        vy = (pos[1] - tsdf.origin[1]) / tsdf.voxel_size + center_offset_y
-        vz = (pos[2] - tsdf.origin[2]) / tsdf.voxel_size + center_offset_z
+        vx = (pos[0] - grid_origin[0]) / tsdf.voxel_size + center_offset_x
+        vy = (pos[1] - grid_origin[1]) / tsdf.voxel_size + center_offset_y
+        vz = (pos[2] - grid_origin[2]) / tsdf.voxel_size + center_offset_z
 
         block_size_f = wp.float32(tsdf.block_size)
         bx = wp.int32(wp.floor(vx / block_size_f))

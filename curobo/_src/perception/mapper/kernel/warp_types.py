@@ -104,8 +104,12 @@ class BlockSparseTSDFWarp:
     # Recycle counter (pre-allocated for CUDA graph safety)
     recycle_count: wp.array(dtype=wp.int32)  # (1,)
 
+    # Grid center in world coordinates, size 1. A device array aliasing
+    # ``BlockSparseTSDFData.origin`` rather than a value, so in-place origin
+    # updates reach cached structs and captured CUDA graphs. Read as origin[0].
+    origin: wp.array(dtype=wp.vec3)
+
     # Grid parameters (scalars)
-    origin: wp.vec3  # World coordinate of grid origin
     voxel_size: float  # Size of each voxel in meters
     hash_capacity: int  # Hash table capacity
     max_blocks: int  # Maximum allocatable blocks

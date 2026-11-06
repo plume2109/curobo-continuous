@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Standard Library
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 # Third Party
 import torch
@@ -46,6 +46,10 @@ class CollisionBuffer:
     #: Device configuration.
     device_cfg: DeviceCfg = None
 
+    #: Flat allocation backing both distance and gradient when they share a dtype, so
+    #: :meth:`zero_` is a single memset. None when the two tensors are separate.
+    _storage: Optional[torch.Tensor] = None
+
     def __post_init__(self):
         """Initialize shape from distance buffer if not provided."""
         if self.shape is None:
@@ -73,24 +77,48 @@ class CollisionBuffer:
             Initialized CollisionBuffer with zeroed tensors.
         """
         batch, horizon, num_spheres = shape[0], shape[1], shape[2]
-
-        distance = torch.zeros(
-            (batch, horizon, num_spheres),
-            device=device_cfg.device,
-            dtype=device_cfg.collision_distance_dtype,
-        )
-        gradient = torch.zeros(
-            (batch, horizon, num_spheres, 4),
-            device=device_cfg.device,
-            dtype=device_cfg.collision_gradient_dtype,
-        )
-
+        new_shape = torch.Size([batch, horizon, num_spheres])
+        distance, gradient, storage = cls._allocate(new_shape, device_cfg)
         return cls(
             distance=distance,
             gradient=gradient,
-            shape=torch.Size([batch, horizon, num_spheres]),
+            shape=new_shape,
             device_cfg=device_cfg,
+            _storage=storage,
         )
+
+    @staticmethod
+    def _allocate(
+        shape: torch.Size, device_cfg: DeviceCfg
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Allocate zeroed distance and gradient tensors.
+
+        When both dtypes match, the tensors are views into one flat allocation so they
+        can be cleared with one memset. The gradient view starts on a 16-byte boundary.
+
+        Args:
+            shape: Distance shape (batch, horizon, num_spheres).
+            device_cfg: Device and dtype configuration.
+
+        Returns:
+            Tuple of distance (batch, horizon, num_spheres), gradient
+            (batch, horizon, num_spheres, 4) and the backing storage (or None).
+        """
+        device = device_cfg.device
+        distance_dtype = device_cfg.collision_distance_dtype
+        gradient_dtype = device_cfg.collision_gradient_dtype
+        num_distance = shape.numel()
+        if distance_dtype != gradient_dtype:
+            distance = torch.zeros(shape, device=device, dtype=distance_dtype)
+            gradient = torch.zeros((*shape, 4), device=device, dtype=gradient_dtype)
+            return distance, gradient, None
+        gradient_offset = (num_distance + 3) // 4 * 4
+        storage = torch.zeros(
+            gradient_offset + num_distance * 4, device=device, dtype=distance_dtype
+        )
+        distance = storage[:num_distance].view(shape)
+        gradient = storage[gradient_offset:].view(*shape, 4)
+        return distance, gradient, storage
 
     # -------------------------------------------------------------------------
     # Buffer Management
@@ -101,8 +129,11 @@ class CollisionBuffer:
 
         Call this before launching collision kernels to reset accumulation.
         """
-        self.distance.zero_()
-        self.gradient.zero_()
+        if self._storage is not None:
+            self._storage.zero_()
+        else:
+            self.distance.zero_()
+            self.gradient.zero_()
 
     def resize(self, shape: Union[torch.Size, List[int]], device_cfg: DeviceCfg) -> None:
         """Resize buffers if shape has changed.
@@ -113,26 +144,27 @@ class CollisionBuffer:
         """
         new_shape = torch.Size([shape[0], shape[1], shape[2]])
         if self.shape != new_shape:
-            self.distance = torch.zeros(
-                new_shape,
-                device=device_cfg.device,
-                dtype=device_cfg.collision_distance_dtype,
-            )
-            self.gradient = torch.zeros(
-                (*new_shape, 4),
-                device=device_cfg.device,
-                dtype=device_cfg.collision_gradient_dtype,
-            )
+            self.distance, self.gradient, self._storage = self._allocate(new_shape, device_cfg)
             self.shape = new_shape
             self.device_cfg = device_cfg
 
     def clone(self) -> CollisionBuffer:
         """Create a deep copy of this buffer."""
+        if self._storage is None:
+            return CollisionBuffer(
+                distance=self.distance.clone(),
+                gradient=self.gradient.clone(),
+                shape=self.shape,
+                device_cfg=self.device_cfg,
+            )
+        storage = self._storage.clone()
+        gradient_offset = self.gradient.storage_offset() - self._storage.storage_offset()
         return CollisionBuffer(
-            distance=self.distance.clone(),
-            gradient=self.gradient.clone(),
+            distance=storage[: self.distance.numel()].view(self.distance.shape),
+            gradient=storage[gradient_offset:].view(self.gradient.shape),
             shape=self.shape,
             device_cfg=self.device_cfg,
+            _storage=storage,
         )
 
     # -------------------------------------------------------------------------

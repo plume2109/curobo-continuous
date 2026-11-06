@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import List, Optional, Union
 
 import torch
-import torch.autograd.profiler as profiler
 
 # Third Party
 import trimesh
@@ -33,6 +32,7 @@ from curobo._src.state.state_joint_ops import augment_joint_state
 from curobo._src.types.pose import Pose
 from curobo._src.types.tool_pose import ToolPose
 from curobo._src.util.logging import log_and_raise
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class Kinematics:
@@ -71,7 +71,7 @@ class Kinematics:
     def tool_frames(self) -> List[str]:
         return self.config.tool_frames
 
-    @profiler.record_function("cuda_robot_model/update_batch_size")
+    @record_function_if_profiling("cuda_robot_model/update_batch_size")
     def update_batch_size(
         self, batch: int, horizon: int, force_update: bool = False, reset_buffers: bool = False
     ):
@@ -98,7 +98,7 @@ class Kinematics:
                 (batch,), dtype=torch.int32, device=self.device_cfg.device
             )
 
-    @profiler.record_function("cuda_robot_model/forward_kinematics")
+    @record_function_if_profiling("cuda_robot_model/forward_kinematics")
     def _forward(
         self,
         joint_position: torch.Tensor,

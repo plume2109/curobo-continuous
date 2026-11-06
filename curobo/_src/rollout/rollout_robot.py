@@ -15,7 +15,6 @@ from typing import Dict, List, Optional
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.cost.cost_base import BaseCost
 
@@ -34,6 +33,7 @@ from curobo._src.state.state_robot import RobotState
 from curobo._src.util.cuda_graph_util import create_graph_executor, GraphExecutor
 from curobo._src.util.logging import log_and_raise
 from curobo._src.util.sampling.sample_buffer import SampleBuffer
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 class RobotRollout:
@@ -45,7 +45,7 @@ class RobotRollout:
     controlled by the ``use_cuda_graph`` constructor parameter.
     """
 
-    @profiler.record_function("robot_rollout/init")
+    @record_function_if_profiling("robot_rollout/init")
     def __init__(
         self,
         config: Optional[RobotRolloutCfg] = None,
@@ -75,7 +75,7 @@ class RobotRollout:
     #  Initialization                                                      #
     # ------------------------------------------------------------------ #
 
-    @profiler.record_function("robot_rollout/init_components")
+    @record_function_if_profiling("robot_rollout/init_components")
     def _initialize_components(self):
         """Create transition models, sampler, cost managers, and collision checker."""
         # Transition models: one for optimization, one for metrics
@@ -266,7 +266,7 @@ class RobotRollout:
     #  Metrics (with optional CUDA graph)                                  #
     # ------------------------------------------------------------------ #
 
-    @profiler.record_function("robot_rollout/compute_metrics_from_state")
+    @record_function_if_profiling("robot_rollout/compute_metrics_from_state")
     def compute_metrics_from_state(self, state: JointState, **kwargs) -> RolloutMetrics:
         """Evaluate costs, constraints, and convergence for a given state.
 
@@ -292,7 +292,7 @@ class RobotRollout:
             return self._compute_metrics_from_state_executor(state)
         return self._compute_metrics_from_state_impl(state, **kwargs)
 
-    @profiler.record_function("robot_rollout/compute_metrics_from_action")
+    @record_function_if_profiling("robot_rollout/compute_metrics_from_action")
     def compute_metrics_from_action(self, act_seq: torch.Tensor, **kwargs) -> RolloutMetrics:
         """Forward-simulate actions and evaluate metrics including convergence.
 
@@ -323,7 +323,7 @@ class RobotRollout:
     #  State computation (public, used by solvers)                         #
     # ------------------------------------------------------------------ #
 
-    @profiler.record_function("robot_rollout/compute_state_from_action")
+    @record_function_if_profiling("robot_rollout/compute_state_from_action")
     def compute_state_from_action(self, act_seq: torch.Tensor, **kwargs) -> JointState:
         return self._compute_state_from_action_impl(act_seq)
 
@@ -334,7 +334,7 @@ class RobotRollout:
     #  Lifecycle                                                           #
     # ------------------------------------------------------------------ #
 
-    @profiler.record_function("robot_rollout/update_params")
+    @record_function_if_profiling("robot_rollout/update_params")
     def update_params(self, goal: GoalRegistry, num_particles: int = None) -> bool:
         """Update goal targets and rebatch for the current optimization round.
 

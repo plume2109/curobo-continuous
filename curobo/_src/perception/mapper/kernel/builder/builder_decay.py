@@ -73,7 +73,6 @@ def make_decay_kernels(
     block_size: int,
     *,
     grid_shape: tuple[int, int, int],
-    origin_xyz: tuple[float, float, float],
     voxel_size: float,
     num_cameras: int,
     image_height: int,
@@ -83,16 +82,13 @@ def make_decay_kernels(
     """Build TSDF weight-decay and block-recycling kernels."""
     suffix = (
         f"bs{block_size}_cfg"
-        f"{warp_constant_suffix(block_size, grid_shape, origin_xyz, voxel_size, num_cameras, image_height, image_width)}"
+        f"{warp_constant_suffix(block_size, grid_shape, voxel_size, num_cameras, image_height, image_width)}"
     )
     BLOCK_SIZE = wp.constant(wp.int32(block_size))
     GRID_D = wp.constant(wp.int32(grid_shape[0]))
     GRID_H = wp.constant(wp.int32(grid_shape[1]))
     GRID_W = wp.constant(wp.int32(grid_shape[2]))
     PI = wp.constant(wp.float32(3.141592653589793))
-    ORIGIN_X = wp.constant(wp.float32(origin_xyz[0]))
-    ORIGIN_Y = wp.constant(wp.float32(origin_xyz[1]))
-    ORIGIN_Z = wp.constant(wp.float32(origin_xyz[2]))
     VOXEL_SIZE = wp.constant(wp.float32(voxel_size))
     NUM_CAMERAS = wp.constant(wp.int32(num_cameras))
     IMAGE_HEIGHT = wp.constant(wp.int32(image_height))
@@ -120,6 +116,7 @@ def make_decay_kernels(
         depth_maximum_distance: float,
         block_in_frustum: wp.array(dtype=wp.int32),
         max_blocks: wp.int32,
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Mark blocks visible in ANY camera's frustum.
 
@@ -160,9 +157,10 @@ def make_decay_kernels(
         gy = gy - wp.float32(GRID_H) * 0.5
         gz = gz - wp.float32(GRID_D) * 0.5
 
-        block_center_x = ORIGIN_X + gx * VOXEL_SIZE
-        block_center_y = ORIGIN_Y + gy * VOXEL_SIZE
-        block_center_z = ORIGIN_Z + gz * VOXEL_SIZE
+        grid_origin = origin[0]
+        block_center_x = grid_origin[0] + gx * VOXEL_SIZE
+        block_center_y = grid_origin[1] + gy * VOXEL_SIZE
+        block_center_z = grid_origin[2] + gz * VOXEL_SIZE
 
         block_extent = wp.float32(BLOCK_SIZE) * VOXEL_SIZE
         sphere_radius = 0.866 * block_extent
@@ -226,6 +224,7 @@ def make_decay_kernels(
         lidar_image_height: wp.int32,
         block_in_frustum: wp.array(dtype=wp.int32),
         max_blocks: wp.int32,
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Mark blocks visible in ANY full-azimuth LiDAR frustum."""
         block_idx, lidar_i = wp.tid()
@@ -256,10 +255,11 @@ def make_decay_kernels(
         gy = gy - wp.float32(GRID_H) * 0.5
         gz = gz - wp.float32(GRID_D) * 0.5
 
+        grid_origin = origin[0]
         block_world = wp.vec3(
-            ORIGIN_X + gx * VOXEL_SIZE,
-            ORIGIN_Y + gy * VOXEL_SIZE,
-            ORIGIN_Z + gz * VOXEL_SIZE,
+            grid_origin[0] + gx * VOXEL_SIZE,
+            grid_origin[1] + gy * VOXEL_SIZE,
+            grid_origin[2] + gz * VOXEL_SIZE,
         )
         block_extent = wp.float32(BLOCK_SIZE) * VOXEL_SIZE
         sphere_radius = wp.float32(0.866) * block_extent

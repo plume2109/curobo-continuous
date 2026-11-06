@@ -34,7 +34,6 @@ def make_stamp_kernels(
     block_size: int,
     *,
     grid_shape: tuple[int, int, int],
-    origin_xyz: tuple[float, float, float],
     voxel_size: float,
     truncation_distance: float,
     pack_key_only,
@@ -48,15 +47,12 @@ def make_stamp_kernels(
     """Build obstacle-stamping kernels."""
     suffix = (
         f"bs{block_size}_cfg"
-        f"{warp_constant_suffix(block_size, grid_shape, origin_xyz, voxel_size, truncation_distance)}"
+        f"{warp_constant_suffix(block_size, grid_shape, voxel_size, truncation_distance)}"
     )
     BLOCK_SIZE = wp.constant(wp.int32(block_size))
     GRID_D = wp.constant(wp.int32(grid_shape[0]))
     GRID_H = wp.constant(wp.int32(grid_shape[1]))
     GRID_W = wp.constant(wp.int32(grid_shape[2]))
-    ORIGIN_X = wp.constant(wp.float32(origin_xyz[0]))
-    ORIGIN_Y = wp.constant(wp.float32(origin_xyz[1]))
-    ORIGIN_Z = wp.constant(wp.float32(origin_xyz[2]))
     VOXEL_SIZE = wp.constant(wp.float32(voxel_size))
     TRUNCATION_DIST = wp.constant(wp.float32(truncation_distance))
     color_grid_voxels = int(color_grid_size) ** 3
@@ -93,6 +89,7 @@ def make_stamp_kernels(
         bx_key: wp.int32,
         by_key: wp.int32,
         bz_key: wp.int32,
+        origin: wp.vec3,
     ) -> wp.vec3:
         block_size_f = wp.float32(BLOCK_SIZE)
         half_block = block_size_f * 0.5
@@ -107,9 +104,9 @@ def make_stamp_kernels(
         vy = wp.float32(by) * block_size_f + half_block
         vz = wp.float32(bz) * block_size_f + half_block
 
-        wx = (vx - wp.float32(GRID_W) * 0.5) * VOXEL_SIZE + ORIGIN_X
-        wy = (vy - wp.float32(GRID_H) * 0.5) * VOXEL_SIZE + ORIGIN_Y
-        wz = (vz - wp.float32(GRID_D) * 0.5) * VOXEL_SIZE + ORIGIN_Z
+        wx = (vx - wp.float32(GRID_W) * 0.5) * VOXEL_SIZE + origin[0]
+        wy = (vy - wp.float32(GRID_H) * 0.5) * VOXEL_SIZE + origin[1]
+        wz = (vz - wp.float32(GRID_D) * 0.5) * VOXEL_SIZE + origin[2]
 
         return wp.vec3(wx, wy, wz)
 
@@ -225,6 +222,7 @@ def make_stamp_kernels(
         env_idx: wp.int32,
         filtered_blocks: wp.array(dtype=wp.int64),
         filtered_count: wp.array(dtype=wp.int32),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Filter blocks by SDF at block center using generic compute_sdf_value.
 
@@ -245,7 +243,7 @@ def make_stamp_kernels(
         if not _is_block_in_bounds(bx, by, bz):
             return
 
-        block_center = _block_center_to_world(bx, by, bz)
+        block_center = _block_center_to_world(bx, by, bz, origin[0])
 
         min_sdf = wp.float32(1e10)
         for i in range(obs_set.max_n):
@@ -272,6 +270,7 @@ def make_stamp_kernels(
         env_idx: wp.int32,
         static_block_data: wp.array2d(dtype=wp.float16),
         static_block_sums: wp.array(dtype=wp.int32),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Stamp SDF values using generic ``compute_local_sdf``.
 
@@ -298,7 +297,7 @@ def make_stamp_kernels(
         by = coords[1]
         bz = coords[2]
 
-        voxel_pos = block_local_to_world(bx, by, bz, local_idx)
+        voxel_pos = block_local_to_world(bx, by, bz, local_idx, origin[0])
 
         min_sdf = wp.float32(1e10)
         for i in range(obs_set.max_n):

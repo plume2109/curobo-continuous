@@ -30,7 +30,6 @@ def make_camera_integrate_kernels(
     image_width: int,
     num_samples: int,
     grid_shape: tuple[int, int, int],
-    origin_xyz: tuple[float, float, float],
     voxel_size: float,
     truncation_distance: float,
     feature_grid_shape: tuple[int, int] | None,
@@ -60,9 +59,6 @@ def make_camera_integrate_kernels(
     GRID_D = wp.constant(wp.int32(grid_shape[0]))
     GRID_H = wp.constant(wp.int32(grid_shape[1]))
     GRID_W = wp.constant(wp.int32(grid_shape[2]))
-    ORIGIN_X = wp.constant(wp.float32(origin_xyz[0]))
-    ORIGIN_Y = wp.constant(wp.float32(origin_xyz[1]))
-    ORIGIN_Z = wp.constant(wp.float32(origin_xyz[2]))
     VOXEL_SIZE = wp.constant(wp.float32(voxel_size))
     TRUNCATION_DIST = wp.constant(wp.float32(truncation_distance))
     safe_step = (float(block_size) * float(voxel_size)) / 1.42
@@ -91,7 +87,6 @@ def make_camera_integrate_kernels(
         image_width,
         num_samples,
         grid_shape,
-        origin_xyz,
         voxel_size,
         truncation_distance,
         feature_grid_shape,
@@ -120,6 +115,7 @@ def make_camera_integrate_kernels(
         depth_min: float,
         depth_max: float,
         block_keys: wp.array(dtype=wp.int64),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Phase 1 (camera projective): emit only block keys, no sample data."""
         tid = wp.tid()
@@ -173,7 +169,7 @@ def make_camera_integrate_kernels(
         )
         point_world = cam_pos + wp.quat_rotate(cam_quat, point_cam)
 
-        voxel_f = world_to_continuous_voxel(point_world)
+        voxel_f = world_to_continuous_voxel(point_world, origin[0])
 
         vx = wp.int32(wp.floor(voxel_f[0]))
         vy = wp.int32(wp.floor(voxel_f[1]))
@@ -314,31 +310,41 @@ def make_camera_integrate_kernels(
         else:
             wp.atomic_add(support_overflow_count, 0, wp.int32(1))
 
-    @warp_kernel(f"collect_blocks_in_aabb_kernel_{suffix}")
-    def collect_blocks_in_aabb_kernel(
+    @warp_kernel(f"collect_blocks_in_aabbs_kernel_{suffix}")
+    def collect_blocks_in_aabbs_kernel(
         hash_table: wp.array(dtype=wp.int64),
         hash_capacity: wp.int32,
-        min_bx: wp.int32,
-        min_by: wp.int32,
-        min_bz: wp.int32,
-        count_x: wp.int32,
-        count_y: wp.int32,
-        count_z: wp.int32,
+        box_min_block: wp.array(dtype=wp.vec3i),
+        box_block_count: wp.array(dtype=wp.vec3i),
+        launch_count_x: wp.int32,
+        launch_count_y: wp.int32,
+        clear_mark: wp.array(dtype=wp.int32),
+        clear_generation: wp.int32,
         clear_pool_indices: wp.array(dtype=wp.int32),
         clear_count: wp.array(dtype=wp.int32),
         max_blocks: wp.int32,
     ):
-        """Collect allocated blocks whose volume intersects a world AABB.
+        """Collect, without duplicates, allocated blocks intersecting any of N AABBs.
 
-        Launch with ``dim = (count_x, count_y, count_z)``.
+        Box ``i`` covers block keys ``box_min_block[i] + [0, box_block_count[i])``. A block
+        hit by several boxes is appended once, using ``clear_mark[pool_idx] ==
+        clear_generation`` as the seen flag.
+
+        Launch with ``dim = (N, launch_count_x * launch_count_y * launch_count_z)`` where
+        ``launch_count_*`` bound every ``box_block_count[i]``.
         """
-        local_x, local_y, local_z = wp.tid()
-        if local_x >= count_x or local_y >= count_y or local_z >= count_z:
+        box_idx, local_flat = wp.tid()
+        count = box_block_count[box_idx]
+        local_x = local_flat % launch_count_x
+        local_y = (local_flat // launch_count_x) % launch_count_y
+        local_z = local_flat // (launch_count_x * launch_count_y)
+        if local_x >= count[0] or local_y >= count[1] or local_z >= count[2]:
             return
 
-        bx = min_bx + local_x
-        by = min_by + local_y
-        bz = min_bz + local_z
+        start = box_min_block[box_idx]
+        bx = start[0] + local_x
+        by = start[1] + local_y
+        bz = start[2] + local_z
 
         grid = block_key_to_grid_coords(bx, by, bz)
         max_bx = (GRID_W + BLOCK_SIZE - wp.int32(1)) // BLOCK_SIZE
@@ -355,7 +361,10 @@ def make_camera_integrate_kernels(
             return
 
         pool_idx = hash_lookup(hash_table, bx, by, bz, hash_capacity)
-        if pool_idx < wp.int32(0):
+        if pool_idx < wp.int32(0) or pool_idx >= max_blocks:
+            return
+
+        if wp.atomic_exch(clear_mark, pool_idx, clear_generation) == clear_generation:
             return
 
         out_idx = wp.atomic_add(clear_count, 0, wp.int32(1))
@@ -479,6 +488,7 @@ def make_camera_integrate_kernels(
         depth_max: float,
         block_coords: wp.array(dtype=wp.int32),
         block_data: wp.array3d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Phase 4 (camera projective): one thread per voxel, serial camera loop.
 
@@ -504,6 +514,7 @@ def make_camera_integrate_kernels(
             by,
             bz,
             local_idx,
+            origin[0],
         )
 
         total_sw = wp.float32(0.0)
@@ -571,6 +582,7 @@ def make_camera_integrate_kernels(
         depth_max: float,
         block_coords: wp.array(dtype=wp.int32),
         block_grid_rgb: wp.array3d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Project each RGB-grid node into cameras and integrate weighted RGBW."""
         vis_idx, node_idx = wp.tid()
@@ -609,7 +621,7 @@ def make_camera_integrate_kernels(
         center_offset_y = wp.float32(GRID_H) * wp.float32(0.5)
         center_offset_z = wp.float32(GRID_D) * wp.float32(0.5)
         node_world = (
-            wp.vec3(ORIGIN_X, ORIGIN_Y, ORIGIN_Z)
+            origin[0]
             + wp.vec3(
                 wp.float32(base[0]) + local_x - center_offset_x,
                 wp.float32(base[1]) + local_y - center_offset_y,
@@ -854,6 +866,7 @@ def make_camera_integrate_kernels(
         block_coords: wp.array(dtype=wp.int32),
         block_features: wp.array3d(dtype=wp.float16),
         block_feature_weight: wp.array2d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Per-node feature-grid integration with support fallback for empty nodes."""
         n_channel_groups = (
@@ -900,7 +913,7 @@ def make_camera_integrate_kernels(
         center_offset_y = wp.float32(GRID_H) * wp.float32(0.5)
         center_offset_z = wp.float32(GRID_D) * wp.float32(0.5)
         node_world = (
-            wp.vec3(ORIGIN_X, ORIGIN_Y, ORIGIN_Z)
+            origin[0]
             + wp.vec3(
                 wp.float32(base[0]) + local_x - center_offset_x,
                 wp.float32(base[1]) + local_y - center_offset_y,
@@ -1042,6 +1055,7 @@ def make_camera_integrate_kernels(
         block_coords: wp.array(dtype=wp.int32),
         block_features: wp.array3d(dtype=wp.float16),
         block_feature_weight: wp.array2d(dtype=wp.float16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Tiled per-node feature-grid integration."""
         n_channel_tiles = (
@@ -1088,7 +1102,7 @@ def make_camera_integrate_kernels(
         center_offset_y = wp.float32(GRID_H) * wp.float32(0.5)
         center_offset_z = wp.float32(GRID_D) * wp.float32(0.5)
         node_world = (
-            wp.vec3(ORIGIN_X, ORIGIN_Y, ORIGIN_Z)
+            origin[0]
             + wp.vec3(
                 wp.float32(base[0]) + local_x - center_offset_x,
                 wp.float32(base[1]) + local_y - center_offset_y,
@@ -1203,7 +1217,7 @@ def make_camera_integrate_kernels(
         "compute_block_keys_only_kernel": compute_block_keys_only_kernel,
         "allocate_visible_blocks_from_keys_kernel": allocate_visible_blocks_from_keys_kernel,
         "build_support_pixels_from_keys_kernel": build_support_pixels_from_keys_kernel,
-        "collect_blocks_in_aabb_kernel": collect_blocks_in_aabb_kernel,
+        "collect_blocks_in_aabbs_kernel": collect_blocks_in_aabbs_kernel,
         "clear_new_block_grid_rgb_kernel": clear_new_block_grid_rgb_kernel,
         "clear_blocks_by_pool_kernel": clear_blocks_by_pool_kernel,
         "clear_block_grid_rgb_by_pool_kernel": clear_block_grid_rgb_by_pool_kernel,

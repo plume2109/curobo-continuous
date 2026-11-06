@@ -30,6 +30,9 @@ class QuasiNewtonBuffers:
         self.grad_0: Optional[torch.Tensor] = None
         self.alpha: Optional[torch.Tensor] = None
         self.step_q_buffer: Optional[torch.Tensor] = None
+        #: S^T Y and Y^T Y of the history, shape [batch, 2, history, history]. Read and kept
+        #: in sync by the compact L-BFGS CUDA kernel.
+        self.gram: Optional[torch.Tensor] = None
 
     def resize(self, num_problems: int, opt_dim: int):
         """Allocate or reallocate all buffers for given problem count and optimization dimension."""
@@ -55,6 +58,9 @@ class QuasiNewtonBuffers:
         self.alpha = torch.zeros(
             (self.history, b, 1, 1), device=device, dtype=dtype
         )
+        self.gram = torch.zeros(
+            (b, 2, self.history, self.history), device=device, dtype=dtype
+        )
 
     def clear(self, mask: Optional[torch.Tensor] = None):
         """Clear history buffers. CUDA graph compatible.
@@ -68,12 +74,14 @@ class QuasiNewtonBuffers:
             self.rho.fill_(0.0)
             self.alpha.fill_(0.0)
             self.step_q_buffer.fill_(0.0)
+            self.gram.fill_(0.0)
         else:
             self.s[:, mask] = 0.0
             self.y[:, mask] = 0.0
             self.rho[:, mask] = 0.0
             self.alpha[:, mask] = 0.0
             self.step_q_buffer[mask] = 0.0
+            self.gram[mask] = 0.0
 
     def set_reference(
         self,
@@ -140,3 +148,15 @@ class QuasiNewtonBuffers:
             shift_steps,
             action_dim,
         )
+        self.refresh_gram()
+
+    def refresh_gram(self):
+        """Recompute ``gram`` from the (s, y) history. CUDA graph compatible.
+
+        Uses elementwise products instead of a matmul, so TF32 matmul settings do not reduce
+        the precision of the dot products.
+        """
+        s = self.s.squeeze(-1).transpose(0, 1).unsqueeze(2)  # [batch, history, 1, opt_dim]
+        y = self.y.squeeze(-1).transpose(0, 1).unsqueeze(1)  # [batch, 1, history, opt_dim]
+        self.gram[:, 0].copy_((s * y).sum(-1))
+        self.gram[:, 1].copy_((y.transpose(1, 2) * y).sum(-1))

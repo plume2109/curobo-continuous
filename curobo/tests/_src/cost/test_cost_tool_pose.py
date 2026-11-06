@@ -513,3 +513,73 @@ class TestToolPoseCostGradients:
         assert current_position.grad.shape == current_position.shape
         assert current_quaternion.grad.shape == current_quaternion.shape
 
+
+
+class TestToolPoseCostReportedError:
+    """The reported position/rotation error is a distance in metres/radians, whatever the
+    per-axis weight of the horizon step it is read at."""
+
+    batch_size = 1
+    horizon = 4
+
+    def _forward(self, device_cfg: DeviceCfg, criteria: ToolPoseCriteria, offset: float,
+                 angle: float):
+        """Current pose offset by `offset` m along x and `angle` rad about z from an identity
+        goal. Returns (linear_dist, angular_dist), each (batch, horizon, 1)."""
+        tool_frames = ["ee_link"]
+        cost = ToolPoseCost(
+            ToolPoseCostCfg(weight=[5000.0, 200.0], tool_frames=tool_frames, device_cfg=device_cfg)
+        )
+        cost.setup_batch_tensors(batch_size=self.batch_size, horizon=self.horizon)
+        cost.update_tool_pose_criteria({"ee_link": criteria})
+
+        tensor_args = device_cfg.as_torch_dict()
+        current_position = torch.zeros((self.batch_size, self.horizon, 1, 3), **tensor_args)
+        current_position[..., 0] = offset
+        current_quaternion = torch.zeros((self.batch_size, self.horizon, 1, 4), **tensor_args)
+        current_quaternion[..., 0] = torch.cos(torch.tensor(angle / 2.0))
+        current_quaternion[..., 3] = torch.sin(torch.tensor(angle / 2.0))
+        goal_position = torch.zeros((1, 1, 1, 1, 3), **tensor_args)
+        goal_quaternion = torch.zeros((1, 1, 1, 1, 4), **tensor_args)
+        goal_quaternion[..., 0] = 1.0
+
+        _, linear_dist, angular_dist, _ = cost.forward(
+            current_tool_poses=ToolPose(
+                tool_frames=tool_frames, position=current_position, quaternion=current_quaternion
+            ),
+            goal_tool_poses=GoalToolPose(
+                tool_frames=tool_frames, position=goal_position, quaternion=goal_quaternion
+            ),
+            idxs_goal=torch.zeros((self.batch_size, 1), device=device_cfg.device,
+                                  dtype=torch.int32),
+        )
+        return linear_dist, angular_dist
+
+    def test_non_terminal_weight_does_not_scale_reported_error(self, device_cfg):
+        """A 0.001 non-terminal weight factor (MPC's default) used to report 10 cm as 0.1 mm."""
+        criteria = ToolPoseCriteria.track_position_and_orientation(non_terminal_scale=0.001)
+        linear_dist, angular_dist = self._forward(device_cfg, criteria, offset=0.1, angle=0.2)
+
+        expected_linear = torch.full_like(linear_dist, 0.1)
+        expected_angular = torch.full_like(angular_dist, 0.2)
+        assert torch.allclose(linear_dist, expected_linear, atol=1e-5)
+        assert torch.allclose(angular_dist, expected_angular, atol=1e-4)
+
+    def test_untracked_axes_are_excluded(self, device_cfg):
+        """Axes weighted 0 do not count: linear_motion along x frees x on non-terminal steps."""
+        criteria = ToolPoseCriteria.linear_motion(axis="x", non_terminal_scale=1.0)
+        linear_dist, _ = self._forward(device_cfg, criteria, offset=0.1, angle=0.0)
+
+        assert torch.allclose(linear_dist[:, :-1], torch.zeros_like(linear_dist[:, :-1]),
+                              atol=1e-6)
+        assert torch.allclose(linear_dist[:, -1], torch.full_like(linear_dist[:, -1], 0.1),
+                              atol=1e-5)
+
+    def test_disabled_criteria_reports_zero(self, device_cfg):
+        """A disabled frame (e.g. the follower of a coupled pair) reports no error."""
+        linear_dist, angular_dist = self._forward(
+            device_cfg, ToolPoseCriteria.disabled(), offset=0.1, angle=0.2
+        )
+
+        assert torch.allclose(linear_dist, torch.zeros_like(linear_dist), atol=1e-6)
+        assert torch.allclose(angular_dist, torch.zeros_like(angular_dist), atol=1e-6)

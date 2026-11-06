@@ -574,3 +574,332 @@ def test_convergence_comparison(optimizer_setup):
     # Both results should be close in terms of final cost
     # We use a relative tolerance to account for different magnitudes
     assert final_cost_cuda == final_cost_no_cuda
+
+
+def gram_of(s_buffer: torch.Tensor, y_buffer: torch.Tensor) -> torch.Tensor:
+    """S^T Y and Y^T Y of [history, batch, opt_dim, 1] buffers, shape [batch, 2, history, history]."""
+    s = s_buffer.squeeze(-1)
+    y = y_buffer.squeeze(-1)
+    # Elementwise products: a matmul would follow the global TF32 setting.
+    s_y = (s.transpose(0, 1).unsqueeze(2) * y.transpose(0, 1).unsqueeze(1)).sum(-1)
+    y_y = (y.transpose(0, 1).unsqueeze(2) * y.transpose(0, 1).unsqueeze(1)).sum(-1)
+    return torch.stack([s_y, y_y], dim=1)
+
+
+@pytest.mark.parametrize("history", [5, 27])
+@pytest.mark.parametrize("use_shared_buffers", [True, False])
+def test_lbfgs_kernel_step_scaling_matches_scale_action(history, use_shared_buffers):
+    """The L-BFGS kernel's in-kernel step scaling matches LineSearchStrategy.scale_action."""
+    from curobo._src.curobolib.cuda_ops.optimization import LBFGScu
+    from curobo._src.optim.gradient.line_search_strategy import LineSearchStrategy
+
+    torch.manual_seed(0)
+    device = torch.device("cuda:0")
+    batch, action_horizon, action_dim = 4, 16, 14
+    opt_dim = action_horizon * action_dim
+
+    def make_inputs():
+        gen = torch.Generator(device=device).manual_seed(1)
+
+        def randn(*shape):
+            return torch.randn(*shape, device=device, generator=gen)
+
+        # Curvature pairs of a diagonal SPD quadratic, so the two-loop recursion is well posed.
+        curvature = 0.5 + torch.rand(batch, opt_dim, 1, device=device, generator=gen)
+        s_buffer = randn(history, batch, opt_dim, 1)
+        y_buffer = curvature * s_buffer
+        rho_buffer = 1.0 / torch.sum(y_buffer * s_buffer, dim=2, keepdim=True)
+        # Problems span step magnitudes below and above the step limit.
+        magnitude = torch.tensor([1e-3, 1.0, 10.0, 100.0], device=device).view(batch, 1, 1)
+        x_0 = randn(batch, opt_dim, 1)
+        q = x_0 + randn(batch, opt_dim, 1)
+        grad_0 = randn(batch, opt_dim, 1) * magnitude
+        grad_q = grad_0 + curvature * (q - x_0)
+        return dict(
+            step_vec=torch.zeros((batch, opt_dim), device=device),
+            rho_buffer=rho_buffer,
+            y_buffer=y_buffer,
+            s_buffer=s_buffer,
+            gram_buffer=gram_of(s_buffer, y_buffer),
+            q=q.view(batch, opt_dim),
+            grad_q=grad_q.view(batch, 1, opt_dim),
+            x_0=x_0,
+            grad_0=grad_0,
+        )
+
+    action_step_max = 0.98 * torch.linspace(0.5, 2.0, action_dim, device=device)
+
+    ref = make_inputs()
+    step_ref = LBFGScu.apply(*ref.values(), 0.1, False, use_shared_buffers).clone()
+    step_ref = LineSearchStrategy.scale_action(
+        step_ref.view(batch, action_horizon, action_dim), action_step_max, 0.98, False,
+        action_horizon,
+    )
+
+    fused = make_inputs()
+    step_fused = LBFGScu.apply(
+        *fused.values(), 0.1, False, use_shared_buffers, action_step_max
+    ).view(batch, action_horizon, action_dim)
+
+    assert torch.isfinite(step_ref).all()
+    assert torch.allclose(step_fused, step_ref, rtol=1e-5, atol=1e-7)
+    ratio = (step_fused.abs() / action_step_max).amax(dim=(1, 2))
+    assert torch.all(ratio <= 1.0 + 1e-5)
+    # History buffers are unaffected by the step scaling.
+    for key in ("rho_buffer", "y_buffer", "s_buffer", "gram_buffer", "x_0", "grad_0"):
+        assert torch.equal(fused[key], ref[key]), key
+
+
+@pytest.mark.parametrize("history, opt_dim", [(1, 16), (5, 7), (15, 40), (27, 112), (28, 224)])
+def test_lbfgs_compact_kernel_matches_global_kernel(history, opt_dim):
+    """The compact kernel and the global-memory kernel take the same steps over many iterations,
+    and the compact kernel keeps the Gram buffer equal to S^T Y and Y^T Y of the history."""
+    from curobo._src.curobolib.cuda_ops.optimization import LBFGScu
+
+    device = torch.device("cuda:0")
+    batch = 3
+    gen = torch.Generator(device=device).manual_seed(0)
+    # Quadratic with eigenvalues in [1, 100].
+    basis, _ = torch.linalg.qr(torch.randn(batch, opt_dim, opt_dim, device=device, generator=gen))
+    eigenvalues = torch.logspace(0, 2, opt_dim, device=device)
+    hessian = basis @ torch.diag_embed(eigenvalues.expand(batch, opt_dim)) @ basis.transpose(1, 2)
+
+    def gradient(x: torch.Tensor) -> torch.Tensor:
+        return (hessian @ x.unsqueeze(-1)).squeeze(-1)
+
+    def make_state(x: torch.Tensor) -> dict:
+        return dict(
+            step_vec=torch.zeros(batch, opt_dim, device=device),
+            rho_buffer=torch.zeros(history, batch, 1, 1, device=device),
+            y_buffer=torch.zeros(history, batch, opt_dim, 1, device=device),
+            s_buffer=torch.zeros(history, batch, opt_dim, 1, device=device),
+            gram_buffer=torch.zeros(batch, 2, history, history, device=device),
+            x_0=x.unsqueeze(-1).clone(),
+            grad_0=gradient(x).unsqueeze(-1),
+        )
+
+    x = torch.randn(batch, opt_dim, device=device, generator=gen)
+    compact, global_memory = make_state(x), make_state(x)
+    x = x - 0.005 * gradient(x)
+    for _ in range(3 * history + 5):
+        steps = []
+        for state, use_shared_buffers in ((compact, True), (global_memory, False)):
+            step = LBFGScu.apply(
+                state["step_vec"], state["rho_buffer"], state["y_buffer"], state["s_buffer"],
+                state["gram_buffer"], x.clone(), gradient(x).view(batch, 1, opt_dim),
+                state["x_0"], state["grad_0"], 0.01, True, use_shared_buffers,
+            )
+            steps.append(step.view(batch, opt_dim).clone())
+        assert torch.allclose(steps[0], steps[1], rtol=1e-4, atol=1e-6 * steps[1].abs().max())
+        for key in ("s_buffer", "y_buffer", "x_0", "grad_0"):
+            assert torch.equal(compact[key], global_memory[key]), key
+        assert torch.allclose(compact["rho_buffer"], global_memory["rho_buffer"], rtol=1e-5)
+        expected_gram = gram_of(compact["s_buffer"], compact["y_buffer"])
+        assert torch.allclose(
+            compact["gram_buffer"], expected_gram, rtol=1e-5, atol=1e-6 * expected_gram.abs().max()
+        )
+        # Exact line search along the global kernel's step.
+        direction = steps[1]
+        curvature = (direction * gradient(direction)).sum(-1, keepdim=True)
+        x = x - (gradient(x) * direction).sum(-1, keepdim=True) / curvature * direction
+
+
+@pytest.mark.parametrize(
+    "history, action_horizon, action_dim, n_linesearch",
+    [(1, 4, 4, 4), (5, 1, 7, 4), (15, 8, 5, 8), (27, 16, 7, 4), (28, 32, 7, 3)],
+)
+@pytest.mark.parametrize("line_search_type", ["wolfe", "strong_wolfe", "approx_wolfe"])
+@pytest.mark.parametrize("scale_step", [True, False])
+def test_line_search_lbfgs_kernel_matches_separate_kernels(
+    history, action_horizon, action_dim, n_linesearch, line_search_type, scale_step
+):
+    """The fused kernel gives bit-identical results to the line search kernel, the compact
+    L-BFGS kernel and the PyTorch search points run one after another."""
+    from curobo._src.curobolib.cuda_ops.optimization import (
+        LBFGScu,
+        wolfe_line_search,
+        wolfe_line_search_lbfgs_step,
+    )
+    from curobo._src.optim.gradient.line_search_context import LineSearchContext
+    from curobo._src.optim.gradient.line_search_strategy import LineSearchStrategy
+
+    device = torch.device("cuda:0")
+    device_cfg = DeviceCfg(device=device, dtype=torch.float32)
+    batch = 8
+    opt_dim = action_horizon * action_dim
+    # The first scale is 0: the line search compares every point with the current one.
+    scales = torch.linspace(0.0, 1.0, n_linesearch).tolist()
+    context = LineSearchContext(
+        device_cfg=device_cfg,
+        line_search_scale=scales,
+        line_search_c_1=1e-3,
+        line_search_c_2=0.9,
+        num_problems=batch,
+        opt_dim=opt_dim,
+        action_horizon=action_horizon,
+        action_dim=action_dim,
+        step_scale=0.98,
+        fix_terminal_action=False,
+        action_horizon_step_max=None,
+        use_cuda_kernel_line_search=True,
+        compute_costs_and_gradients=None,
+        convergence_iteration=2,
+        cost_delta_threshold=0.0,
+        cost_relative_threshold=0.0,
+    )
+    action_step_max = (
+        0.98 * torch.linspace(0.05, 0.2, action_dim, device=device) if scale_step else None
+    )
+
+    def make_inputs() -> dict:
+        gen = torch.Generator(device=device).manual_seed(0)
+
+        def randn(*shape):
+            return torch.randn(*shape, device=device, generator=gen)
+
+        curvature = 0.5 + torch.rand(batch, opt_dim, 1, device=device, generator=gen)
+        s_buffer = randn(history, batch, opt_dim, 1)
+        y_buffer = curvature * s_buffer
+        x_0 = randn(batch, opt_dim, 1)
+        grad_0 = randn(batch, opt_dim, 1)
+        direction = randn(batch, action_horizon, action_dim)
+        exploration_action = x_0.view(batch, action_horizon, action_dim) + randn(
+            batch, action_horizon, action_dim
+        )
+        search_action = exploration_action.view(batch, 1, opt_dim) + context.line_search_scale.view(
+            1, n_linesearch, 1
+        ) * direction.view(batch, 1, opt_dim)
+        # The directional derivative grows along the line, from -0.6 |d|^2 at the current
+        # point, plus noise that grows across problems, so the problems take different
+        # Wolfe branches.
+        search_gradient = (context.line_search_scale.view(1, n_linesearch, 1) - 0.6) * direction.view(
+            batch, 1, opt_dim
+        ) + randn(batch, n_linesearch, opt_dim) * torch.linspace(0.1, 2.0, batch, device=device).view(
+            batch, 1, 1
+        )
+        search_cost = randn(batch, n_linesearch, 1)
+        state = OptimizationIterationState(
+            action=randn(batch, action_horizon, action_dim),
+            cost=randn(batch),
+            gradient=randn(batch, action_horizon, action_dim),
+            exploration_action=exploration_action,
+            exploration_gradient=randn(batch, action_horizon, action_dim),
+            exploration_cost=randn(batch),
+            step_direction=direction,
+            best_action=randn(batch, action_horizon, action_dim),
+            best_cost=randn(batch),
+            best_iteration=torch.randint(
+                0, 4, (batch,), device=device, dtype=torch.int32, generator=gen
+            ),
+            current_iteration=torch.full((batch,), 4, device=device, dtype=torch.int32),
+            converged=torch.zeros(batch, device=device, dtype=torch.uint8),
+        )
+        return dict(
+            state=state,
+            exploration_idx=torch.zeros(batch, n_linesearch, device=device, dtype=torch.int32),
+            selected_idx=torch.zeros(batch, n_linesearch, device=device, dtype=torch.int32),
+            search_cost=search_cost,
+            search_action=search_action.contiguous(),
+            search_gradient=search_gradient.contiguous(),
+            step_vec=torch.zeros(batch, opt_dim, device=device),
+            rho_buffer=1.0 / torch.sum(y_buffer * s_buffer, dim=2, keepdim=True),
+            y_buffer=y_buffer,
+            s_buffer=s_buffer,
+            gram_buffer=gram_of(s_buffer, y_buffer),
+            x_0=x_0,
+            grad_0=grad_0,
+        )
+
+    strong_wolfe = line_search_type == "strong_wolfe"
+    approx_wolfe = line_search_type == "approx_wolfe"
+
+    ref = make_inputs()
+    ref_state = ref["state"]
+    wolfe_line_search(
+        ref_state, context, ref["exploration_idx"], ref["selected_idx"], ref["search_cost"],
+        ref["search_action"], ref["search_gradient"],
+        ref_state.step_direction.view(batch, 1, opt_dim), strong_wolfe, approx_wolfe,
+    )
+    ref_step = LBFGScu.apply(
+        ref["step_vec"], ref["rho_buffer"], ref["y_buffer"], ref["s_buffer"],
+        ref["gram_buffer"], ref_state.exploration_action.view(batch, opt_dim),
+        ref_state.exploration_gradient.view(batch, 1, opt_dim), ref["x_0"], ref["grad_0"],
+        0.01, True, True, action_step_max,
+    ).view(batch, action_horizon, action_dim)
+    ref_search_action = LineSearchStrategy.jit_get_x_set(
+        ref_step, ref_state.exploration_action, context.line_search_scale
+    ).view(batch, n_linesearch, opt_dim)
+
+    fused = make_inputs()
+    fused_state = fused["state"]
+    wolfe_line_search_lbfgs_step(
+        fused_state, context, fused["exploration_idx"], fused["selected_idx"],
+        fused["search_cost"], fused["search_action"], fused["search_gradient"], strong_wolfe,
+        approx_wolfe, fused["step_vec"], fused["rho_buffer"], fused["y_buffer"],
+        fused["s_buffer"], fused["gram_buffer"], fused["x_0"], fused["grad_0"], 0.01, True,
+        action_step_max,
+    )
+
+    # The line search picks different points across problems.
+    assert len(torch.unique(ref["exploration_idx"][:, 0])) > 1
+    assert torch.isfinite(ref_step).all()
+    assert torch.equal(fused["step_vec"].view_as(ref_step), ref_step)
+    assert torch.equal(fused["search_action"], ref_search_action)
+    for key in ("exploration_idx", "selected_idx", "rho_buffer", "y_buffer", "s_buffer",
+                "gram_buffer", "x_0", "grad_0"):
+        assert torch.equal(fused[key], ref[key]), key
+    for key in ("action", "cost", "gradient", "exploration_action", "exploration_gradient",
+                "exploration_cost", "best_action", "best_cost", "best_iteration",
+                "current_iteration", "converged"):
+        assert torch.equal(getattr(fused_state, key), getattr(ref_state, key)), key
+
+
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+def test_lbfgs_fused_step_matches_separate_kernels(optimizer_setup, use_cuda_graph):
+    """LBFGSOpt with the fused line search and L-BFGS kernel returns the same actions, bit for
+    bit, as with the separate kernels, over several inner-iteration blocks and solves."""
+    batch_size = optimizer_setup["batch_size"]
+
+    def make_optimizer(fused: bool) -> LBFGSOpt:
+        config = LBFGSOptCfg(
+            num_problems=batch_size,
+            num_iters=50,
+            inner_iters=25,
+            history=27,
+            step_scale=0.98,
+            use_cuda_kernel_step_direction=True,
+            use_cuda_kernel_shared_buffers=True,
+            use_cuda_kernel_line_search=True,
+            use_cuda_kernel_fused_step=fused,
+            stable_mode=True,
+            solver_type="lbfgs",
+            line_search_scale=[0, 0.1, 0.5, 1.0],
+        )
+        rollout_fn = optimizer_setup["rollout_fn"]
+        optimizer = LBFGSOpt(config, [rollout_fn, rollout_fn], use_cuda_graph=use_cuda_graph)
+        optimizer.update_num_problems(batch_size)
+        return optimizer
+
+    fused_optimizer = make_optimizer(True)
+    separate_optimizer = make_optimizer(False)
+    assert fused_optimizer._use_fused_step
+    assert not separate_optimizer._use_fused_step
+
+    initial_action = (
+        torch.randn(
+            batch_size,
+            optimizer_setup["action_horizon"],
+            optimizer_setup["num_dof"],
+            device=optimizer_setup["device"],
+            dtype=optimizer_setup["dtype"],
+        )
+        * 10.0
+    )
+    for _ in range(2):
+        results = []
+        for optimizer in (fused_optimizer, separate_optimizer):
+            action = initial_action.clone()
+            optimizer.reinitialize(action)
+            results.append(optimizer.optimize(action).clone())
+        assert torch.equal(results[0], results[1])
+        assert cost_fn(results[0]).mean().item() < cost_fn(initial_action).mean().item()

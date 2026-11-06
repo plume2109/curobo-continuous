@@ -8,12 +8,12 @@
 from typing import Tuple
 
 import torch
-import torch.autograd.profiler as profiler
+from curobo._src.util.torch_util import record_function_if_profiling
 
 # CuRobo
 
 
-@profiler.record_function("particle_opt_utils/get_stomp_cov")
+@record_function_if_profiling("particle_opt_utils/get_stomp_cov")
 def get_stomp_cov(
     horizon: int,
     zero_out_boundary: bool = True,

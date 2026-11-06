@@ -25,6 +25,7 @@ Example:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Sequence
 from os import PathLike
@@ -265,13 +266,30 @@ class Mapper:
             )
         return camera_observation, lidar_observation
 
+    @deprecated("Use Mapper.clear_regions(bounds_min, bounds_max); it takes one box or N boxes.")
     def clear_region(self, bounds_min, bounds_max) -> int:
         """Clear dynamic map contents inside a conservative world-space AABB.
 
         Blocks remain allocated. The cached ESDF voxel grid is invalidated and
         must be recomputed with :meth:`compute_esdf`.
         """
-        n_clear = self._integrator.clear_region(bounds_min, bounds_max)
+        return self.clear_regions(bounds_min, bounds_max)
+
+    def clear_regions(self, bounds_min: torch.Tensor, bounds_max: torch.Tensor) -> int:
+        """Clear dynamic map contents inside N conservative world-space AABBs at once.
+
+        Every allocated block intersecting any box is cleared, with two host syncs whatever
+        N is. Blocks remain allocated; the cached ESDF voxel grid is invalidated and must be
+        recomputed with :meth:`compute_esdf`.
+
+        Args:
+            bounds_min: World-space lower corners, shape ``(N, 3)``, or ``(3,)`` for one box.
+            bounds_max: World-space upper corners, same shape as ``bounds_min``.
+
+        Returns:
+            Number of distinct allocated blocks cleared.
+        """
+        n_clear = self._integrator.clear_regions(bounds_min, bounds_max)
         if n_clear > 0:
             self._last_voxel_grid = None
         return n_clear
@@ -456,6 +474,22 @@ class Mapper:
     def reset(self) -> None:
         """Reset mapper for new scene."""
         self._integrator.reset()
+        self._last_voxel_grid = None
+
+    def set_origin(self, grid_center: torch.Tensor) -> None:
+        """Move the map to a new grid center and reset it.
+
+        Equivalent to building a new Mapper with ``grid_center``, without
+        recompiling kernels or reallocating buffers. The map is cleared.
+
+        Args:
+            grid_center: New world coordinate of the grid center, shape ``(3,)`` [m].
+        """
+        grid_center = torch.as_tensor(grid_center, dtype=torch.float32).reshape(3)
+        self._integrator.set_origin(grid_center)
+        self.config = dataclasses.replace(
+            self.config, grid_center=grid_center.detach().to(device="cpu").clone()
+        )
         self._last_voxel_grid = None
 
     def save_blocks(self, file_path: Union[str, PathLike[str]]) -> None:

@@ -165,3 +165,5 @@ docker/pkgs/*
 *.svg
 *.SVG
 !docs/images/*.svg
+
+fork_doc/

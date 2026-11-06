@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.optim.components.gradient_opt_core import GradientOptCore
 from curobo._src.optim.components.quasi_newton_buffers import QuasiNewtonBuffers
@@ -21,6 +20,7 @@ from curobo._src.optim.optimization_iteration_state import OptimizationIteration
 from curobo._src.rollout.rollout_protocol import Rollout
 from curobo._src.util.logging import log_info
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 @get_torch_jit_decorator()
@@ -84,7 +84,7 @@ class LSR1Opt:
     update of the inverse Hessian approximation.
     """
 
-    @profiler.record_function("lsr1_opt/init")
+    @record_function_if_profiling("lsr1_opt/init")
     def __init__(
         self,
         config: LBFGSOptCfg,

@@ -14,7 +14,6 @@ from typing import Dict, Optional
 
 # Third Party
 import torch
-import torch.autograd.profiler as profiler
 
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
@@ -38,6 +37,7 @@ from curobo._src.util.cuda_event_timer import CudaEventTimer
 from curobo._src.util.logging import log_and_raise, log_warn
 from curobo._src.util.tensor_util import stable_topk
 from curobo._src.util.torch_util import get_torch_jit_decorator
+from curobo._src.util.torch_util import record_function_if_profiling
 
 
 def _pad_batch_inputs(
@@ -317,7 +317,7 @@ class IKSolver:
     # Goal buffer
     # -------------------------------------------------------------------
 
-    @profiler.record_function("ik_solver/prepare_goal_buffer")
+    @record_function_if_profiling("ik_solver/prepare_goal_buffer")
     def _prepare_goal_buffer(
         self,
         solve_state: SolveState,
@@ -367,7 +367,7 @@ class IKSolver:
             )
         return current_state
 
-    @profiler.record_function("ik_solver/solve_impl")
+    @record_function_if_profiling("ik_solver/solve_impl")
     def _solve_impl(
         self,
         solve_state: SolveState,
@@ -448,7 +448,7 @@ class IKSolver:
         sol = in_solution[i[: s.shape[0]]]
         return sol
 
-    @profiler.record_function("ik_solver/_get_result")
+    @record_function_if_profiling("ik_solver/_get_result")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def _get_result(
         self,
@@ -635,7 +635,7 @@ class IKSolver:
     # Public solve methods
     # -------------------------------------------------------------------
 
-    @profiler.record_function("ik_solver/solve_pose")
+    @record_function_if_profiling("ik_solver/solve_pose")
     def solve_pose(
         self,
         goal_tool_poses: GoalToolPose,
@@ -761,7 +761,7 @@ class IKSolver:
             result = _slice_batch_result(result, actual_batch_size)
         return result
 
-    @profiler.record_function("ik_solver/update_world")
+    @record_function_if_profiling("ik_solver/update_world")
     def update_world(self, scene_cfg: SceneCfg) -> None:
         """Reload the collision model from a new scene configuration."""
         self.scene_collision_checker.load_collision_model(scene_cfg)
