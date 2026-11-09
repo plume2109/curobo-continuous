@@ -123,6 +123,7 @@ class Mapper:
             depth_maximum_distance=config.depth_maximum_distance,
             frustum_decay=config.frustum_decay_factor,
             frustum_decay_depth_margin=config.frustum_decay_depth_margin,
+            frustum_decay_per_voxel=config.frustum_decay_per_voxel,
             time_decay=config.decay_factor,
             minimum_tsdf_weight=config.minimum_tsdf_weight,
             grid_shape=config.grid_shape,

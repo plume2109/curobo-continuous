@@ -107,6 +107,10 @@ class BlockSparseTSDFIntegratorCfg:
         frustum_decay_depth_margin: If set, frustum decay only hits blocks the
             camera sees through (depth beyond block + margin [m]); occluded
             geometry is kept. None decays every in-view block.
+        frustum_decay_per_voxel: Also fade single voxels the camera sees
+            through (depth beyond voxel + ``frustum_decay_depth_margin``) in
+            blocks that fail the whole-block test. Block RGB and features are
+            not faded per voxel. Requires ``frustum_decay_depth_margin``.
         time_decay: Decay for all voxels (1.0=persist, 0.99=slow fade).
         minimum_tsdf_weight: Minimum weight to consider a voxel as observed.
             Since weight = 1/depth² (clamped to [0.001, 2.0]), this can be interpreted
@@ -131,6 +135,7 @@ class BlockSparseTSDFIntegratorCfg:
     depth_maximum_distance: float = 5.0
     frustum_decay: float = 1.0  # 1.0 = no extra decay for in-view voxels
     frustum_decay_depth_margin: Optional[float] = None  # None = decay all in-view blocks
+    frustum_decay_per_voxel: bool = False
     time_decay: float = 1.0  # 1.0 = no time decay
     minimum_tsdf_weight: float = 0.1
     grid_shape: Tuple[int, int, int] = None
@@ -755,6 +760,7 @@ class BlockSparseTSDFIntegrator:
             camera_depth_maximum_distance=self.config.depth_maximum_distance,
             camera_depth_images=camera_depth_images,
             camera_depth_test_margin=self.config.frustum_decay_depth_margin,
+            camera_depth_test_per_voxel=self.config.frustum_decay_per_voxel,
             lidar_positions=lidar_positions,
             lidar_quaternions=lidar_quaternions,
             lidar_valid_range_m=lidar_valid_range_m,

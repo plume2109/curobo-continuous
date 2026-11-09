@@ -66,6 +66,13 @@ class MapperCfg:
             the camera sees through: the measured depth must lie beyond the
             block plus this margin [m]. Geometry hidden behind a nearer
             surface is then kept. None (default) decays every in-view block.
+        frustum_decay_per_voxel: If True, blocks that fail the whole-block
+            see-through test are tested voxel by voxel: a voxel whose pixel
+            shows depth beyond the voxel plus ``frustum_decay_depth_margin``
+            has its TSDF weight faded by ``frustum_decay_factor``. Clears
+            removed objects that share a block with a surface. Block RGB and
+            features are not faded per voxel. Requires
+            ``frustum_decay_depth_margin``. Default False.
         block_size: Voxels per block edge. Supported values are 1 or
             powers of 2 in [2, 32]
             (default 8). Specializes the Warp kernel builder; two
@@ -93,6 +100,7 @@ class MapperCfg:
     decay_factor: float = 1.0
     frustum_decay_factor: float = 1.0
     frustum_decay_depth_margin: Optional[float] = None
+    frustum_decay_per_voxel: bool = False
 
     # === Block Storage ===
     #: Voxels per block edge. Supported values are 1 or powers of 2 in [2, 32]. See
@@ -263,6 +271,8 @@ class MapperCfg:
             raise ValueError(
                 f"frustum_decay_depth_margin must be >= 0: {self.frustum_decay_depth_margin}"
             )
+        if self.frustum_decay_per_voxel and self.frustum_decay_depth_margin is None:
+            raise ValueError("frustum_decay_per_voxel requires frustum_decay_depth_margin.")
 
         # Validate hash_load_factor
         if not (0.0 < self.hash_load_factor <= 1.0):
