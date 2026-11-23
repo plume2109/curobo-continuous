@@ -115,6 +115,8 @@ class BlockSparseESDFIntegratorCfg:
         frustum_decay_per_voxel: Also fade single seen-through voxels in
             blocks that fail the whole-block test. Requires
             ``frustum_decay_depth_margin``.
+        frustum_decay_maximum_distance: Farthest clearing depth [m] the
+            decay trusts; None is ``depth_maximum_distance``.
         time_decay: Decay for all voxels (1.0=persist, 0.99=slow fade).
         minimum_tsdf_weight: Minimum weight to consider a voxel as observed.
             Since weight = 1/depth² (clamped to [0.001, 2.0]), this can be interpreted
@@ -151,6 +153,7 @@ class BlockSparseESDFIntegratorCfg:
     frustum_decay: float = 0.5
     frustum_decay_depth_margin: Optional[float] = None
     frustum_decay_per_voxel: bool = False
+    frustum_decay_maximum_distance: Optional[float] = None
     time_decay: float = 1.0
     minimum_tsdf_weight: float = 0.1
     blend_esdf: bool = False
@@ -426,6 +429,7 @@ class BlockSparseESDFIntegrator:
             frustum_decay=config.frustum_decay,
             frustum_decay_depth_margin=config.frustum_decay_depth_margin,
             frustum_decay_per_voxel=config.frustum_decay_per_voxel,
+            frustum_decay_maximum_distance=config.frustum_decay_maximum_distance,
             time_decay=config.time_decay,
             minimum_tsdf_weight=config.minimum_tsdf_weight,
             grid_shape=config.grid_shape,

@@ -73,6 +73,11 @@ class MapperCfg:
             removed objects that share a block with a surface. Block RGB and
             features are not faded per voxel. Requires
             ``frustum_decay_depth_margin``. Default False.
+        frustum_decay_maximum_distance: Farthest depth [m] the depth-tested
+            frustum decay trusts in ``CameraObservation.clearing_depth_image``
+            (Clearing). Clearing depth beyond it is read as exactly it. None
+            (default) or less is ``depth_maximum_distance``. Larger lets a camera
+            that sees past the integrated range clear up to this distance.
         block_size: Voxels per block edge. Supported values are 1 or
             powers of 2 in [2, 32]
             (default 8). Specializes the Warp kernel builder; two
@@ -101,6 +106,7 @@ class MapperCfg:
     frustum_decay_factor: float = 1.0
     frustum_decay_depth_margin: Optional[float] = None
     frustum_decay_per_voxel: bool = False
+    frustum_decay_maximum_distance: Optional[float] = None
 
     # === Block Storage ===
     #: Voxels per block edge. Supported values are 1 or powers of 2 in [2, 32]. See

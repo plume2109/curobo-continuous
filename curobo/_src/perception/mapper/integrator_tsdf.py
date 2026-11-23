@@ -111,6 +111,9 @@ class BlockSparseTSDFIntegratorCfg:
             through (depth beyond voxel + ``frustum_decay_depth_margin``) in
             blocks that fail the whole-block test. Block RGB and features are
             not faded per voxel. Requires ``frustum_decay_depth_margin``.
+        frustum_decay_maximum_distance: Farthest depth [m] the decay trusts in
+            ``CameraObservation.clearing_depth_image``; None is
+            ``depth_maximum_distance``.
         time_decay: Decay for all voxels (1.0=persist, 0.99=slow fade).
         minimum_tsdf_weight: Minimum weight to consider a voxel as observed.
             Since weight = 1/depth² (clamped to [0.001, 2.0]), this can be interpreted
@@ -136,6 +139,7 @@ class BlockSparseTSDFIntegratorCfg:
     frustum_decay: float = 1.0  # 1.0 = no extra decay for in-view voxels
     frustum_decay_depth_margin: Optional[float] = None  # None = decay all in-view blocks
     frustum_decay_per_voxel: bool = False
+    frustum_decay_maximum_distance: Optional[float] = None
     time_decay: float = 1.0  # 1.0 = no time decay
     minimum_tsdf_weight: float = 0.1
     grid_shape: Tuple[int, int, int] = None
@@ -716,6 +720,7 @@ class BlockSparseTSDFIntegrator:
         camera_quaternions = None
         camera_img_shape = None
         camera_depth_images = None
+        clearing_max = float(self.config.depth_maximum_distance)
         if camera_observation is not None:
             depth_images = camera_observation.depth_image
             if depth_images.ndim != 3:
@@ -734,6 +739,17 @@ class BlockSparseTSDFIntegrator:
             camera_quaternions = camera_observation.pose.quaternion.view(n_cameras, 4)
             camera_img_shape = (int(depth_images.shape[1]), int(depth_images.shape[2]))
             camera_depth_images = depth_images
+            clearing_depth = camera_observation.clearing_depth_image
+            if clearing_depth is not None:
+                if clearing_depth.shape != depth_images.shape:
+                    log_and_raise(
+                        "clearing_depth_image must match depth_image's shape "
+                        f"{tuple(depth_images.shape)}, got {tuple(clearing_depth.shape)}."
+                    )
+                # Seen past the clearing range: tested as seen exactly up to
+                # it, so it clears what lies within it and nothing beyond.
+                clearing_max = self._clearing_maximum_distance()
+                camera_depth_images = clearing_depth.to(torch.float32).clamp(max=clearing_max)
 
         lidar_positions = None
         lidar_quaternions = None
@@ -757,7 +773,7 @@ class BlockSparseTSDFIntegrator:
             camera_quaternions=camera_quaternions,
             camera_img_shape=camera_img_shape,
             camera_depth_minimum_distance=self.config.depth_minimum_distance,
-            camera_depth_maximum_distance=self.config.depth_maximum_distance,
+            camera_depth_maximum_distance=clearing_max,
             camera_depth_images=camera_depth_images,
             camera_depth_test_margin=self.config.frustum_decay_depth_margin,
             camera_depth_test_per_voxel=self.config.frustum_decay_per_voxel,
@@ -770,6 +786,13 @@ class BlockSparseTSDFIntegrator:
             frustum_decay=self.config.frustum_decay,
             num_blocks=num_blocks,
         )
+
+    def _clearing_maximum_distance(self) -> float:
+        """Farthest clearing depth the decay trusts [m]: never short of the integrated range."""
+        depth_max = float(self.config.depth_maximum_distance)
+        if self.config.frustum_decay_maximum_distance is None:
+            return depth_max
+        return max(depth_max, float(self.config.frustum_decay_maximum_distance))
 
     def _integrate_lidar_frame(
         self,
