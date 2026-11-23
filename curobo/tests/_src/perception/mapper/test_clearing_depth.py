@@ -32,7 +32,7 @@ def warp_init():
     return True
 
 
-def _integrator() -> BlockSparseTSDFIntegrator:
+def _integrator(clearing_max=None) -> BlockSparseTSDFIntegrator:
     return BlockSparseTSDFIntegrator(
         BlockSparseTSDFIntegratorCfg(
             max_blocks=8000,
@@ -48,6 +48,7 @@ def _integrator() -> BlockSparseTSDFIntegrator:
             frustum_decay=0.8,
             frustum_decay_depth_margin=0.01,
             frustum_decay_per_voxel=True,
+            frustum_decay_maximum_distance=clearing_max,
             minimum_tsdf_weight=2.5,
             tsdf_weight_max=30.0,
             tsdf_coverage_weighting=False,
@@ -76,9 +77,9 @@ def _occupied(integrator) -> int:
     return len(integrator.extract_occupied_voxels(surface_only=False).centers)
 
 
-def _with_wall() -> BlockSparseTSDFIntegrator:
-    integrator = _integrator()
-    _observe(integrator, WALL_M, frames=10)
+def _with_wall(wall_m=WALL_M, clearing_max=None) -> BlockSparseTSDFIntegrator:
+    integrator = _integrator(clearing_max)
+    _observe(integrator, wall_m, frames=10)
     assert _occupied(integrator) > 0
     return integrator
 
@@ -117,3 +118,27 @@ def test_clearing_depth_must_match_the_depth_shape(warp_init):
     obs.clearing_depth_image = torch.zeros((1, IMG_H, IMG_W + 1), device="cuda:0")
     with pytest.raises(Exception, match="clearing_depth_image"):
         integrator.integrate(obs)
+
+
+EDGE_WALL_M = 0.88  # within range, but within the margin of its end
+
+
+def test_within_the_margin_of_the_range_a_wall_is_never_cleared(warp_init):
+    """Clearing depth read as the range (0.9 m) cannot see 0.01 m beyond a wall at 0.88 m."""
+    integrator = _with_wall(EDGE_WALL_M)
+    _observe(integrator, 0.0, frames=30, clearing_m=1.3)
+    assert _occupied(integrator) > 0
+
+
+def test_a_longer_clearing_range_clears_up_to_the_range_end(warp_init):
+    integrator = _with_wall(EDGE_WALL_M, clearing_max=1.5)
+    _observe(integrator, 0.0, frames=30, clearing_m=1.3)
+    assert _occupied(integrator) == 0
+
+
+def test_the_clearing_range_is_never_passed(warp_init):
+    """From 0.7 m back the wall is 1.58 m away, beyond the 1.5 m clearing range."""
+    integrator = _with_wall(EDGE_WALL_M, clearing_max=1.5)
+    before = _occupied(integrator)
+    _observe(integrator, 0.0, frames=30, clearing_m=float("inf"), z=-0.7)
+    assert _occupied(integrator) == before
