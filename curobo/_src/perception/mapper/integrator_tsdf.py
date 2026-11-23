@@ -734,6 +734,18 @@ class BlockSparseTSDFIntegrator:
             camera_quaternions = camera_observation.pose.quaternion.view(n_cameras, 4)
             camera_img_shape = (int(depth_images.shape[1]), int(depth_images.shape[2]))
             camera_depth_images = depth_images
+            clearing_depth = camera_observation.clearing_depth_image
+            if clearing_depth is not None:
+                if clearing_depth.shape != depth_images.shape:
+                    log_and_raise(
+                        "clearing_depth_image must match depth_image's shape "
+                        f"{tuple(depth_images.shape)}, got {tuple(clearing_depth.shape)}."
+                    )
+                # Seen past the range: tested as seen exactly up to it, so it
+                # clears what lies within range and nothing beyond.
+                camera_depth_images = clearing_depth.to(torch.float32).clamp(
+                    max=float(self.config.depth_maximum_distance)
+                )
 
         lidar_positions = None
         lidar_quaternions = None
