@@ -76,8 +76,8 @@ class MapperCfg:
         frustum_decay_maximum_distance: Farthest depth [m] the depth-tested
             frustum decay trusts in ``CameraObservation.clearing_depth_image``
             (Clearing). Clearing depth beyond it is read as exactly it. None
-            (default) is ``depth_maximum_distance``. Larger lets a camera that
-            sees past the integrated range clear up to this distance.
+            (default) or less is ``depth_maximum_distance``. Larger lets a camera
+            that sees past the integrated range clear up to this distance.
         block_size: Voxels per block edge. Supported values are 1 or
             powers of 2 in [2, 32]
             (default 8). Specializes the Warp kernel builder; two
@@ -279,14 +279,6 @@ class MapperCfg:
             )
         if self.frustum_decay_per_voxel and self.frustum_decay_depth_margin is None:
             raise ValueError("frustum_decay_per_voxel requires frustum_decay_depth_margin.")
-        if (
-            self.frustum_decay_maximum_distance is not None
-            and self.frustum_decay_maximum_distance < self.depth_maximum_distance
-        ):
-            raise ValueError(
-                "frustum_decay_maximum_distance must be >= depth_maximum_distance: "
-                f"{self.frustum_decay_maximum_distance} < {self.depth_maximum_distance}"
-            )
 
         # Validate hash_load_factor
         if not (0.0 < self.hash_load_factor <= 1.0):

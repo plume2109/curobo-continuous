@@ -788,10 +788,11 @@ class BlockSparseTSDFIntegrator:
         )
 
     def _clearing_maximum_distance(self) -> float:
-        """Farthest clearing depth the decay trusts [m]."""
+        """Farthest clearing depth the decay trusts [m]: never short of the integrated range."""
+        depth_max = float(self.config.depth_maximum_distance)
         if self.config.frustum_decay_maximum_distance is None:
-            return float(self.config.depth_maximum_distance)
-        return float(self.config.frustum_decay_maximum_distance)
+            return depth_max
+        return max(depth_max, float(self.config.frustum_decay_maximum_distance))
 
     def _integrate_lidar_frame(
         self,
