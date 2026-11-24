@@ -104,6 +104,16 @@ class BlockSparseTSDFIntegratorCfg:
         depth_minimum_distance: Minimum valid depth in meters.
         depth_maximum_distance: Maximum valid depth in meters.
         frustum_decay: Decay for in-view voxels (0.5=quick adapt, 1.0=no extra decay).
+        frustum_decay_depth_margin: If set, frustum decay only hits blocks the
+            camera sees through (depth beyond block + margin [m]); occluded
+            geometry is kept. None decays every in-view block.
+        frustum_decay_per_voxel: Also fade single voxels the camera sees
+            through (depth beyond voxel + ``frustum_decay_depth_margin``) in
+            blocks that fail the whole-block test. Block RGB and features are
+            not faded per voxel. Requires ``frustum_decay_depth_margin``.
+        frustum_decay_maximum_distance: Farthest depth [m] the decay trusts in
+            ``CameraObservation.clearing_depth_image``; None is
+            ``depth_maximum_distance``.
         time_decay: Decay for all voxels (1.0=persist, 0.99=slow fade).
         minimum_tsdf_weight: Minimum weight to consider a voxel as observed.
             Since weight = 1/depth² (clamped to [0.001, 2.0]), this can be interpreted
@@ -127,6 +137,9 @@ class BlockSparseTSDFIntegratorCfg:
     depth_minimum_distance: float = 0.1
     depth_maximum_distance: float = 5.0
     frustum_decay: float = 1.0  # 1.0 = no extra decay for in-view voxels
+    frustum_decay_depth_margin: Optional[float] = None  # None = decay all in-view blocks
+    frustum_decay_per_voxel: bool = False
+    frustum_decay_maximum_distance: Optional[float] = None
     time_decay: float = 1.0  # 1.0 = no time decay
     minimum_tsdf_weight: float = 0.1
     grid_shape: Tuple[int, int, int] = None
@@ -197,6 +210,16 @@ class BlockSparseTSDFIntegratorCfg:
     #: ``W_max / mean_per_frame_weight`` for old observations. See
     #: :attr:`BlockSparseTSDFCfg.accumulator_w_max`.
     accumulator_w_max: float = 10000.0
+    #: Upper bound on each voxel's TSDF weight. When an integration step
+    #: pushes a voxel's weight above it, the weighted SDF sum and the weight
+    #: are scaled down together, keeping the SDF and giving EMA semantics.
+    #: The default (fp16 max) only prevents overflow to ``inf``, which would
+    #: freeze the voxel as a surface that no decay can remove.
+    tsdf_weight_max: float = 65504.0
+    #: Weight each observation of a voxel by the pixel area it covers
+    #: (``(f * voxel / z)^2``). False counts every observation as 1, so the
+    #: weight is a frame count and decay times do not depend on distance.
+    tsdf_coverage_weighting: bool = True
 
     def __post_init__(self):
         if self.origin is None:
@@ -418,6 +441,8 @@ class BlockSparseTSDFIntegrator:
             max_support_pixels_per_block_camera=config.max_support_pixels_per_block_camera,
             color_grid_size=config.color_grid_size,
             accumulator_w_max=config.accumulator_w_max,
+            tsdf_weight_max=config.tsdf_weight_max,
+            tsdf_coverage_weighting=config.tsdf_coverage_weighting,
         )
         if kernels is None:
             kernels = make_block_sparse_kernels(config)
@@ -694,6 +719,8 @@ class BlockSparseTSDFIntegrator:
         camera_positions = None
         camera_quaternions = None
         camera_img_shape = None
+        camera_depth_images = None
+        clearing_max = float(self.config.depth_maximum_distance)
         if camera_observation is not None:
             depth_images = camera_observation.depth_image
             if depth_images.ndim != 3:
@@ -711,6 +738,18 @@ class BlockSparseTSDFIntegrator:
             camera_positions = camera_observation.pose.position.view(n_cameras, 3)
             camera_quaternions = camera_observation.pose.quaternion.view(n_cameras, 4)
             camera_img_shape = (int(depth_images.shape[1]), int(depth_images.shape[2]))
+            camera_depth_images = depth_images
+            clearing_depth = camera_observation.clearing_depth_image
+            if clearing_depth is not None:
+                if clearing_depth.shape != depth_images.shape:
+                    log_and_raise(
+                        "clearing_depth_image must match depth_image's shape "
+                        f"{tuple(depth_images.shape)}, got {tuple(clearing_depth.shape)}."
+                    )
+                # Seen past the clearing range: tested as seen exactly up to
+                # it, so it clears what lies within it and nothing beyond.
+                clearing_max = self._clearing_maximum_distance()
+                camera_depth_images = clearing_depth.to(torch.float32).clamp(max=clearing_max)
 
         lidar_positions = None
         lidar_quaternions = None
@@ -734,7 +773,10 @@ class BlockSparseTSDFIntegrator:
             camera_quaternions=camera_quaternions,
             camera_img_shape=camera_img_shape,
             camera_depth_minimum_distance=self.config.depth_minimum_distance,
-            camera_depth_maximum_distance=self.config.depth_maximum_distance,
+            camera_depth_maximum_distance=clearing_max,
+            camera_depth_images=camera_depth_images,
+            camera_depth_test_margin=self.config.frustum_decay_depth_margin,
+            camera_depth_test_per_voxel=self.config.frustum_decay_per_voxel,
             lidar_positions=lidar_positions,
             lidar_quaternions=lidar_quaternions,
             lidar_valid_range_m=lidar_valid_range_m,
@@ -744,6 +786,13 @@ class BlockSparseTSDFIntegrator:
             frustum_decay=self.config.frustum_decay,
             num_blocks=num_blocks,
         )
+
+    def _clearing_maximum_distance(self) -> float:
+        """Farthest clearing depth the decay trusts [m]: never short of the integrated range."""
+        depth_max = float(self.config.depth_maximum_distance)
+        if self.config.frustum_decay_maximum_distance is None:
+            return depth_max
+        return max(depth_max, float(self.config.frustum_decay_maximum_distance))
 
     def _integrate_lidar_frame(
         self,

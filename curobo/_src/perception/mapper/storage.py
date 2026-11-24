@@ -152,6 +152,16 @@ class BlockSparseTSDFCfg:
     #: ``W_max / mean_per_frame_weight``, which is desirable for dynamic
     #: scenes but means callers should pick ``W_max`` deliberately.
     accumulator_w_max: float = 1000.0
+    #: Upper bound on each voxel's TSDF weight. When an integration step
+    #: pushes a voxel's weight above it, the weighted SDF sum and the weight
+    #: are scaled down together, keeping the SDF and giving EMA semantics.
+    #: The default (fp16 max) only prevents overflow to ``inf``, which would
+    #: freeze the voxel as a surface that no decay can remove.
+    tsdf_weight_max: float = 65504.0
+    #: Weight each observation of a voxel by the pixel area it covers
+    #: (``(f * voxel / z)^2``). False counts every observation as 1, so the
+    #: weight is a frame count and decay times do not depend on distance.
+    tsdf_coverage_weighting: bool = True
 
     def __post_init__(self):
         if self.origin is None:

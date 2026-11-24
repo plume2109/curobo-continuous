@@ -117,12 +117,23 @@ def make_decay_kernels(
         block_in_frustum: wp.array(dtype=wp.int32),
         max_blocks: wp.int32,
         origin: wp.array(dtype=wp.vec3),
+        depth_images: wp.array3d(dtype=wp.float32),
+        depth_test: wp.int32,
+        depth_margin: wp.float32,
     ):
         """Mark blocks visible in ANY camera's frustum.
 
         Parallelized across (block, camera) pairs. Multiple threads
         may write ``1`` to the same ``block_in_frustum[block_idx]``;
         the write is idempotent so no atomics are needed.
+
+        With ``depth_test != 0`` a block is only marked when the camera
+        sees through it: every pixel with valid depth in a 3x3 grid
+        spanning the block's projected bounding sphere (clamped into the
+        image) must hold a depth beyond the sphere's far side plus
+        ``depth_margin`` [m], and at least one such pixel must exist.
+        Blocks hidden behind a nearer surface are left unmarked, so
+        occluded geometry is not decayed.
 
         Launch with ``dim = (max_blocks, n_cameras)``. The flags
         array must be zeroed before launch.
@@ -187,7 +198,8 @@ def make_decay_kernels(
             return
 
         if z_cam < 0.01:
-            block_in_frustum[block_idx] = 1
+            if depth_test == wp.int32(0):
+                block_in_frustum[block_idx] = 1
             return
 
         fx = intrinsics[cam_i, 0, 0]
@@ -210,7 +222,131 @@ def make_decay_kernels(
         if v - pixel_radius_y > wp.float32(IMAGE_HEIGHT):
             return
 
+        if depth_test != wp.int32(0):
+            # Depth must lie beyond the whole block (far side of its
+            # bounding sphere) plus a margin at every sampled pixel that
+            # has valid depth. Samples are clamped into the image, because
+            # a block close to the camera projects far past its border.
+            # Pixels without valid depth are no evidence either way; at
+            # least one valid sample is needed.
+            required_depth = z_cam + sphere_radius + depth_margin
+            valid_samples = wp.int32(0)
+            for i in range(3):
+                for j in range(3):
+                    pu = wp.int32(wp.floor(u + pixel_radius_x * wp.float32(i - 1)))
+                    pv = wp.int32(wp.floor(v + pixel_radius_y * wp.float32(j - 1)))
+                    pu = wp.clamp(pu, wp.int32(0), IMAGE_WIDTH - wp.int32(1))
+                    pv = wp.clamp(pv, wp.int32(0), IMAGE_HEIGHT - wp.int32(1))
+                    d = depth_images[cam_i, pv, pu]
+                    if d >= depth_minimum_distance and d <= depth_maximum_distance:
+                        if d < required_depth:
+                            return
+                        valid_samples += wp.int32(1)
+            if valid_samples == wp.int32(0):
+                return
+
         block_in_frustum[block_idx] = 1
+
+    BLOCK_VOXELS = wp.constant(wp.int32(block_size**3))
+
+    @warp_kernel(f"decay_seen_through_voxels_kernel_{suffix}")
+    def decay_seen_through_voxels_kernel(
+        block_coords: wp.array(dtype=wp.int32),
+        block_to_hash_slot: wp.array(dtype=wp.int32),
+        num_allocated: wp.array(dtype=wp.int32),
+        block_in_frustum: wp.array(dtype=wp.int32),
+        intrinsics: wp.array3d(dtype=wp.float32),
+        cam_positions: wp.array2d(dtype=wp.float32),
+        cam_quaternions: wp.array2d(dtype=wp.float32),
+        depth_images: wp.array3d(dtype=wp.float32),
+        depth_minimum_distance: float,
+        depth_maximum_distance: float,
+        depth_margin: wp.float32,
+        frustum_decay: wp.float32,
+        block_data: wp.array3d(dtype=wp.float16),
+        max_blocks: wp.int32,
+        origin: wp.array(dtype=wp.vec3),
+    ):
+        """Fade single voxels the cameras see through, in blocks not faded whole.
+
+        Runs after :func:`mark_blocks_in_frustum_kernel` with its depth test.
+        Blocks it marked are faded whole later and are skipped here. For
+        the others, each voxel centre is projected into every camera; if
+        some camera's pixel holds valid depth at or beyond the voxel depth
+        plus ``depth_margin`` [m], the voxel's SDF sum and weight are
+        multiplied by ``frustum_decay``. Voxels at or behind the measured
+        depth, and pixels without valid depth, never fade the voxel.
+
+        Launch with ``dim = (num_blocks, block_size ** 3)``.
+        """
+        block_idx, local_idx = wp.tid()
+
+        if block_idx >= max_blocks or local_idx >= BLOCK_VOXELS:
+            return
+        if block_idx >= num_allocated[0]:
+            return
+        if block_to_hash_slot[block_idx] < 0:
+            return
+        if block_in_frustum[block_idx] != wp.int32(0):
+            return
+        if block_data[block_idx, local_idx, 1] == wp.float16(0.0):
+            return
+
+        blocks_W = (GRID_W + BLOCK_SIZE - wp.int32(1)) // BLOCK_SIZE
+        blocks_H = (GRID_H + BLOCK_SIZE - wp.int32(1)) // BLOCK_SIZE
+        blocks_D = (GRID_D + BLOCK_SIZE - wp.int32(1)) // BLOCK_SIZE
+        bx = block_coords[block_idx * 3 + 0] + blocks_W // wp.int32(2)
+        by = block_coords[block_idx * 3 + 1] + blocks_H // wp.int32(2)
+        bz = block_coords[block_idx * 3 + 2] + blocks_D // wp.int32(2)
+
+        # Same voxel centre as the integration kernel (block_local_to_world).
+        lx = local_idx % BLOCK_SIZE
+        ly = (local_idx // BLOCK_SIZE) % BLOCK_SIZE
+        lz = local_idx // (BLOCK_SIZE * BLOCK_SIZE)
+        grid_origin = origin[0]
+        voxel_world = wp.vec3(
+            (wp.float32(bx * BLOCK_SIZE + lx) + 0.5 - wp.float32(GRID_W) * 0.5) * VOXEL_SIZE
+            + grid_origin[0],
+            (wp.float32(by * BLOCK_SIZE + ly) + 0.5 - wp.float32(GRID_H) * 0.5) * VOXEL_SIZE
+            + grid_origin[1],
+            (wp.float32(bz * BLOCK_SIZE + lz) + 0.5 - wp.float32(GRID_D) * 0.5) * VOXEL_SIZE
+            + grid_origin[2],
+        )
+
+        seen_through = wp.int32(0)
+        for cam_i in range(NUM_CAMERAS):
+            cam_pos = wp.vec3(
+                cam_positions[cam_i, 0],
+                cam_positions[cam_i, 1],
+                cam_positions[cam_i, 2],
+            )
+            cam_quat = wp.quaternion(
+                cam_quaternions[cam_i, 1],
+                cam_quaternions[cam_i, 2],
+                cam_quaternions[cam_i, 3],
+                cam_quaternions[cam_i, 0],
+            )
+            voxel_cam = wp.quat_rotate(wp.quat_inverse(cam_quat), voxel_world - cam_pos)
+            z_cam = voxel_cam[2]
+            if z_cam > depth_minimum_distance:
+                u = intrinsics[cam_i, 0, 0] * voxel_cam[0] / z_cam + intrinsics[cam_i, 0, 2]
+                v = intrinsics[cam_i, 1, 1] * voxel_cam[1] / z_cam + intrinsics[cam_i, 1, 2]
+                if u >= 0.0 and v >= 0.0:
+                    px = wp.int32(u)
+                    py = wp.int32(v)
+                    if px < IMAGE_WIDTH and py < IMAGE_HEIGHT:
+                        d = depth_images[cam_i, py, px]
+                        if d >= depth_minimum_distance and d <= depth_maximum_distance:
+                            if d >= z_cam + depth_margin:
+                                seen_through = wp.int32(1)
+
+        if seen_through != wp.int32(0):
+            block_data[block_idx, local_idx, 0] = wp.float16(
+                wp.float32(block_data[block_idx, local_idx, 0]) * frustum_decay
+            )
+            block_data[block_idx, local_idx, 1] = wp.float16(
+                wp.float32(block_data[block_idx, local_idx, 1]) * frustum_decay
+            )
 
     @warp_kernel(f"mark_lidar_blocks_in_frustum_kernel_{suffix}")
     def mark_lidar_blocks_in_frustum_kernel(
@@ -365,6 +501,7 @@ def make_decay_kernels(
     return {
         "mark_blocks_in_frustum_kernel": mark_blocks_in_frustum_kernel,
         "mark_lidar_blocks_in_frustum_kernel": mark_lidar_blocks_in_frustum_kernel,
+        "decay_seen_through_voxels_kernel": decay_seen_through_voxels_kernel,
         "recycle_empty_blocks_kernel": recycle_empty_blocks_kernel,
         "block_empty_threshold": block_empty_threshold,
     }

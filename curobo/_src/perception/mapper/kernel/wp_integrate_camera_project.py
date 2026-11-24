@@ -734,6 +734,8 @@ class CameraProjectIntegrator:
                 data.block_coords,
                 data.block_data,
                 data.origin,
+                float(tsdf.config.tsdf_weight_max),
+                int(tsdf.config.tsdf_coverage_weighting),
             ],
             device=device,
             stream=stream,

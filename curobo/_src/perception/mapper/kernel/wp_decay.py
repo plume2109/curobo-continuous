@@ -158,6 +158,9 @@ def decay_frustum_aware_multi_sensor(
     camera_img_shape: tuple[int, int] | None = None,
     camera_depth_minimum_distance: float = 0.1,
     camera_depth_maximum_distance: float = 10.0,
+    camera_depth_images: torch.Tensor | None = None,
+    camera_depth_test_margin: float | None = None,
+    camera_depth_test_per_voxel: bool = False,
     lidar_positions: torch.Tensor | None = None,
     lidar_quaternions: torch.Tensor | None = None,
     lidar_valid_range_m: torch.Tensor | None = None,
@@ -169,9 +172,20 @@ def decay_frustum_aware_multi_sensor(
 ):
     """Frustum-aware decay for the union of provided camera/LiDAR frusta.
 
-    The current depth/range images are not inspected. Sensor geometry marks
-    blocks that are currently observable, then one decay/recycle pass is
-    applied using the union flag.
+    By default the current depth/range images are not inspected: sensor
+    geometry marks blocks that are currently observable, then one
+    decay/recycle pass is applied using the union flag.
+
+    When ``camera_depth_test_margin`` is set, camera blocks are only marked
+    if ``camera_depth_images`` ``(num_cameras, H, W)`` float32 [m] shows the
+    camera seeing through them (depth beyond the block plus the margin), so
+    geometry hidden behind a nearer surface is not decayed. LiDAR marking is
+    unchanged.
+
+    With ``camera_depth_test_per_voxel`` (requires ``camera_depth_test_margin``),
+    blocks that fail the whole-block test are tested voxel by voxel: a voxel
+    whose pixel shows depth beyond the voxel plus the margin is faded by
+    ``frustum_decay`` on its own. Block RGB and features are not touched.
     """
     max_blocks = tsdf.config.max_blocks
     n = num_blocks
@@ -222,6 +236,17 @@ def decay_frustum_aware_multi_sensor(
             camera_positions=camera_positions,
             camera_quaternions=camera_quaternions,
         )
+        depth_test = camera_depth_test_margin is not None
+        if camera_depth_test_per_voxel and not depth_test:
+            log_and_raise("camera_depth_test_per_voxel requires camera_depth_test_margin.")
+        if depth_test:
+            if camera_depth_images is None:
+                log_and_raise("camera_depth_test_margin requires camera_depth_images.")
+            check_float32_tensors(camera_intrinsics.device, camera_depth_images=camera_depth_images)
+            depth_for_test = camera_depth_images.contiguous()
+        else:
+            # Unused by the kernel when depth_test == 0; any float32 3D array works.
+            depth_for_test = torch.zeros((1, 1, 1), dtype=torch.float32, device=camera_intrinsics.device)
         wp.launch(
             kernels.mark_blocks_in_frustum_kernel,
             dim=(n, n_cameras),
@@ -237,6 +262,9 @@ def decay_frustum_aware_multi_sensor(
                 wp.from_torch(frustum_flags, dtype=wp.int32),
                 max_blocks,
                 data.origin,
+                wp.from_torch(depth_for_test, dtype=wp.float32),
+                int(depth_test),
+                float(camera_depth_test_margin or 0.0),
             ],
             device=device,
             stream=stream,
@@ -285,6 +313,32 @@ def decay_frustum_aware_multi_sensor(
             stream=stream,
         )
 
+    # After all block marking, so a voxel is never faded twice in one Frame.
+    if has_camera and camera_depth_test_per_voxel:
+        wp.launch(
+            kernels.decay_seen_through_voxels_kernel,
+            dim=(n, tsdf.data.block_data.shape[1]),
+            inputs=[
+                data.block_coords,
+                data.block_to_hash_slot,
+                data.num_allocated,
+                wp.from_torch(frustum_flags, dtype=wp.int32),
+                wp.from_torch(camera_intrinsics, dtype=wp.float32),
+                wp.from_torch(camera_positions, dtype=wp.float32),
+                wp.from_torch(camera_quaternions, dtype=wp.float32),
+                wp.from_torch(depth_for_test, dtype=wp.float32),
+                camera_depth_minimum_distance,
+                camera_depth_maximum_distance,
+                float(camera_depth_test_margin),
+                float(frustum_decay),
+                data.block_data,
+                max_blocks,
+                data.origin,
+            ],
+            device=device,
+            stream=stream,
+        )
+
     apply_decay_from_frustum_flags(
         tsdf,
         num_blocks=n,
@@ -304,6 +358,9 @@ def decay_frustum_aware_multi_camera(
     time_decay: float = 1.0,
     frustum_decay: float = 0.5,
     num_blocks: int = None,
+    depth_images: torch.Tensor | None = None,
+    depth_test_margin: float | None = None,
+    depth_test_per_voxel: bool = False,
 ):
     """Frustum-aware decay for multiple cameras + block recycling.
 
@@ -318,6 +375,12 @@ def decay_frustum_aware_multi_camera(
         time_decay: Decay for all voxels.
         frustum_decay: Extra decay for in-view blocks.
         num_blocks: If provided, use as slice size instead of ``max_blocks``.
+        depth_images: Current depth ``(num_cameras, H, W)`` float32 [m], used
+            when ``depth_test_margin`` is set.
+        depth_test_margin: If set, only decay blocks the cameras see through
+            (depth beyond the block plus this margin [m]).
+        depth_test_per_voxel: Also fade single seen-through voxels in blocks
+            that fail the whole-block test. Requires ``depth_test_margin``.
     """
     decay_frustum_aware_multi_sensor(
         tsdf,
@@ -327,6 +390,9 @@ def decay_frustum_aware_multi_camera(
         camera_img_shape=img_shape,
         camera_depth_minimum_distance=depth_minimum_distance,
         camera_depth_maximum_distance=depth_maximum_distance,
+        camera_depth_images=depth_images,
+        camera_depth_test_margin=depth_test_margin,
+        camera_depth_test_per_voxel=depth_test_per_voxel,
         time_decay=time_decay,
         frustum_decay=frustum_decay,
         num_blocks=num_blocks,

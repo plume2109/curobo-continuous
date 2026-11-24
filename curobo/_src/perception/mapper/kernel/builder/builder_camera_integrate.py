@@ -489,12 +489,18 @@ def make_camera_integrate_kernels(
         block_coords: wp.array(dtype=wp.int32),
         block_data: wp.array3d(dtype=wp.float16),
         origin: wp.array(dtype=wp.vec3),
+        weight_max: wp.float32,
+        coverage_weighting: wp.int32,
     ):
         """Phase 4 (camera projective): one thread per voxel, serial camera loop.
 
         Launch with ``dim = (n_visible, BLOCK_SIZE ** 3)``. ``BLOCK_SIZE`` is
         closure-captured so thread indexing stays consistent with
         the specialized block-voxel count.
+
+        Each observation weighs ``coverage`` (pixel area of the voxel) when
+        ``coverage_weighting != 0``, else 1. The voxel weight is capped at
+        ``weight_max`` by scaling the SDF sum and weight together.
         """
         vis_idx, local_idx = wp.tid()
 
@@ -555,17 +561,23 @@ def make_camera_integrate_kernels(
                         if sdf >= -TRUNCATION_DIST:
                             sdf_clamped = wp.min(sdf, TRUNCATION_DIST)
                             base_weight = compute_tsdf_weight(depth, VOXEL_SIZE)
-                            coverage = (fx * VOXEL_SIZE / z_cam) * (fy * VOXEL_SIZE / z_cam)
-                            weight = base_weight * wp.max(coverage, 1.0)
+                            weight = base_weight
+                            if coverage_weighting != wp.int32(0):
+                                coverage = (fx * VOXEL_SIZE / z_cam) * (fy * VOXEL_SIZE / z_cam)
+                                weight = base_weight * wp.max(coverage, 1.0)
 
                             total_sw = total_sw + sdf_clamped * weight
                             total_w = total_w + weight
 
         if total_w > 0.0:
-            old_sw = wp.float32(block_data[pool_idx, local_idx, 0])
-            old_w = wp.float32(block_data[pool_idx, local_idx, 1])
-            block_data[pool_idx, local_idx, 0] = wp.float16(old_sw + total_sw)
-            block_data[pool_idx, local_idx, 1] = wp.float16(old_w + total_w)
+            new_sw = wp.float32(block_data[pool_idx, local_idx, 0]) + total_sw
+            new_w = wp.float32(block_data[pool_idx, local_idx, 1]) + total_w
+            if new_w > weight_max:
+                scale = weight_max / new_w
+                new_sw = new_sw * scale
+                new_w = weight_max
+            block_data[pool_idx, local_idx, 0] = wp.float16(new_sw)
+            block_data[pool_idx, local_idx, 1] = wp.float16(new_w)
 
     @warp_kernel(f"integrate_block_grid_rgb_kernel_{suffix}")
     def integrate_block_grid_rgb_kernel(

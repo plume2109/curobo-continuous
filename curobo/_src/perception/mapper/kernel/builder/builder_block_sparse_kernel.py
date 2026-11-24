@@ -113,6 +113,7 @@ class BlockSparseKernels:
 
     mark_blocks_in_frustum_kernel: WarpKernel
     mark_lidar_blocks_in_frustum_kernel: WarpKernel
+    decay_seen_through_voxels_kernel: WarpKernel
     recycle_empty_blocks_kernel: WarpKernel
     block_empty_threshold: Any
 
