@@ -838,6 +838,7 @@ class CameraProjectIntegrator:
                     depth_max,
                     data.block_coords,
                     data.block_instance_state,
+                    data.origin,
                 ],
                 device=device,
                 stream=stream,

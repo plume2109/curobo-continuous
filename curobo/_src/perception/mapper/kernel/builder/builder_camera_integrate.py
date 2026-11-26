@@ -1043,6 +1043,7 @@ def make_camera_integrate_kernels(
         depth_max: wp.float32,
         block_coords: wp.array(dtype=wp.int32),
         block_instance_state: wp.array2d(dtype=wp.int16),
+        origin: wp.array(dtype=wp.vec3),
     ):
         """Fuse multiview categorical votes and update temporal ownership."""
         vis_idx, node_idx = wp.tid()
@@ -1064,7 +1065,7 @@ def make_camera_integrate_kernels(
         local_z = (wp.float32(gz) + wp.float32(0.5)) * cell_width
         base = block_key_to_voxel_base(bx, by, bz)
         node_world = (
-            wp.vec3(ORIGIN_X, ORIGIN_Y, ORIGIN_Z)
+            origin[0]
             + wp.vec3(
                 wp.float32(base[0]) + local_x - wp.float32(GRID_W) * wp.float32(0.5),
                 wp.float32(base[1]) + local_y - wp.float32(GRID_H) * wp.float32(0.5),
