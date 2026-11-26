@@ -58,6 +58,13 @@ class CameraObservation:
     #: background; slots 1..255 are stable only for the lifetime of the
     #: caller-owned instance registry.
     instance_image: Optional[torch.Tensor] = None
+    #: Optional depth used only by the depth-tested frustum decay (Clearing),
+    #: same shape as ``depth_image``, in metres. Where it lies beyond the
+    #: integrator's ``depth_maximum_distance`` (``inf`` allowed), the camera
+    #: saw past that range: the decay reads it as exactly that distance, so
+    #: it clears up to the range and never beyond. Pixels at 0 are no
+    #: evidence. None: the decay tests ``depth_image``, as before.
+    clearing_depth_image: Optional[torch.Tensor] = None
 
     def filter_depth(self, distance: float = 0.01):
         if self.depth_image is None:
@@ -90,6 +97,8 @@ class CameraObservation:
             self.feature_grid.copy_(new_data.feature_grid)
         if self.instance_image is not None and new_data.instance_image is not None:
             self.instance_image.copy_(new_data.instance_image)
+        if self.clearing_depth_image is not None and new_data.clearing_depth_image is not None:
+            self.clearing_depth_image.copy_(new_data.clearing_depth_image)
         self.depth_to_meter = new_data.depth_to_meter
         self.resolution = new_data.resolution
 
@@ -114,6 +123,11 @@ class CameraObservation:
             feature_grid=(self.feature_grid.clone() if self.feature_grid is not None else None),
             instance_image=(
                 self.instance_image.clone() if self.instance_image is not None else None
+            ),
+            clearing_depth_image=(
+                self.clearing_depth_image.clone()
+                if self.clearing_depth_image is not None
+                else None
             ),
             name=self.name,
             depth_to_meter=self.depth_to_meter,
@@ -148,6 +162,11 @@ class CameraObservation:
         )
         self.instance_image = (
             self.instance_image.to(device=device) if self.instance_image is not None else None
+        )
+        self.clearing_depth_image = (
+            self.clearing_depth_image.to(device=device)
+            if self.clearing_depth_image is not None
+            else None
         )
 
         return self
